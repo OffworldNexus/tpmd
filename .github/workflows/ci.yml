@@ -1,8 +1,10 @@
 name: CI
 
 on:
+  # Every ticket gets its own `feature/<linear-id>-…` branch, so those are
+  # first-class CI targets alongside the integration branch, `develop`.
   push:
-    branches: [develop, main]
+    branches: [develop, "feature/**"]
   pull_request:
 
 # One concurrent run per branch; never cancel a run already in progress on
