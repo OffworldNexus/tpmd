@@ -5,10 +5,10 @@
 //! enforces the consumer's security floor and answers the operations in
 //! `tpmd-proto`. It never exports a private key.
 //!
-//! Backend selection is a compile-time choice: this crate depends on exactly
-//! one backend crate (here `tpmd-backend-dummy`) and drives it through the
-//! [`tpmd_backend::Backend`] trait. Adding a backend is a feature-gated
-//! dependency change, not a rewrite of the daemon.
+//! Every backend compiled into this binary for the current OS is registered
+//! with [`registry`]; the daemon selects one at run time — the strongest
+//! usable, or the one named by `--backend` — and drives it through the
+//! object-safe [`tpmd_backend::Backend`] trait as an `Arc<dyn Backend>`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -19,14 +19,17 @@ use std::time::Duration;
 
 use thiserror::Error;
 use tpmd_backend::{Backend, BackendError, Owner, Principal, select_level};
-use tpmd_backend_dummy::DummyBackend;
-use tpmd_ipc::{Connection, Endpoint, FrameIoError, Listener, read_message, write_message};
+use tpmd_ipc::{
+    Connection, Endpoint, FrameIoError, Listener, SocketAccess, read_message, write_message,
+};
 use tpmd_proto::{
     Capabilities, DAEMON_VERSION, ErrorCode, ErrorDetail, ErrorReply, KeyInfo, KeyOutcome,
     KeyRequest, MAX_NAMESPACE_LEN, Message, Op, Reject, RejectCode, Reply, Response, Status,
     Welcome, default_limits,
 };
 use tracing::{info, warn};
+
+pub mod registry;
 
 /// How long to wait for the `HELLO` before giving up on a connection.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,20 +39,27 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct Config {
     /// The local endpoint to bind.
     pub endpoint: Endpoint,
-    /// Where the backend keeps its state.
+    /// Where the backends keep their state (one shared store).
     pub state_dir: PathBuf,
     /// The floor the daemon advertises as its default. Enforcement itself is
     /// driven by each caller's request, so a client must explicitly consent
     /// (`allow_below_floor`) to go lower.
     pub default_min_security: tpmd_proto::SecurityLevel,
+    /// Force a specific backend by name. `None` selects the strongest usable
+    /// backend automatically.
+    pub backend: Option<String>,
+    /// How reachable the bound socket is: owner-only for a per-user daemon, or
+    /// any local user for a shared system daemon (authorization is still
+    /// per-operation, from kernel peer credentials).
+    pub socket_access: SocketAccess,
 }
 
 /// Errors that stop the daemon entirely.
 #[derive(Debug, Error)]
 pub enum DaemonError {
-    /// The backend could not be opened.
-    #[error("backend: {0}")]
-    Backend(#[from] BackendError),
+    /// No backend could be selected.
+    #[error("backend selection: {0}")]
+    Selection(#[from] registry::SelectionError),
     /// The endpoint could not be bound.
     #[error("binding endpoint: {0}")]
     Bind(#[source] std::io::Error),
@@ -92,10 +102,19 @@ pub fn state_dir() -> PathBuf {
 
 /// Run the daemon until interrupted.
 pub async fn run(config: Config) -> Result<(), DaemonError> {
-    let backend = Arc::new(DummyBackend::open(&config.state_dir)?);
-    info!(db = %backend.db_path().display(), "opened dummy backend");
+    let selection = registry::select(
+        &registry::builtin_factories(),
+        &config.state_dir,
+        config.backend.as_deref(),
+    )
+    .await?;
+    let backend = selection.backend;
+    for (name, reason) in &selection.skipped {
+        info!(backend = name, reason = %reason, "backend skipped");
+    }
+    info!(backend = backend.name(), "backend selected");
 
-    let mut listener = Listener::bind(config.endpoint.clone())
+    let mut listener = Listener::bind(config.endpoint.clone(), config.socket_access)
         .await
         .map_err(DaemonError::Bind)?;
     info!(endpoint = %listener.endpoint().display(), "tpmd listening");
@@ -139,7 +158,7 @@ async fn shutdown_signal() {
 /// Serve one connection: handshake, then the request loop.
 async fn handle_connection(
     mut connection: Connection,
-    backend: Arc<DummyBackend>,
+    backend: Arc<dyn Backend>,
     default_min_security: tpmd_proto::SecurityLevel,
 ) -> Result<(), FrameIoError> {
     let limits = default_limits();
@@ -187,7 +206,7 @@ async fn handle_connection(
         default_min_security,
     };
 
-    let key = match establish_key(backend.as_ref(), &session, hello.key) {
+    let key = match establish_key(backend.as_ref(), &session, hello.key).await {
         Ok(outcome) => outcome,
         Err(handshake_reject) => {
             return reject_message(&mut connection, handshake_reject).await;
@@ -207,7 +226,7 @@ async fn handle_connection(
     loop {
         match tokio::time::timeout(idle, read_message(&mut connection.stream)).await {
             Ok(Ok(Message::Request(request))) => {
-                let result = dispatch(backend.as_ref(), &session, request.op);
+                let result = dispatch(backend.as_ref(), &session, request.op).await;
                 let response = Message::Response(Response {
                     id: request.id,
                     result,
@@ -264,7 +283,7 @@ fn capabilities(backend: &dyn Backend) -> Capabilities {
     }
 }
 
-fn establish_key(
+async fn establish_key(
     backend: &dyn Backend,
     session: &Session,
     request: KeyRequest,
@@ -272,15 +291,15 @@ fn establish_key(
     match request {
         KeyRequest::None => Ok(KeyOutcome::None),
         KeyRequest::Create(provision) => {
-            let info = provision_key(backend, session, provision)?;
+            let info = provision_key(backend, session, provision).await?;
             Ok(KeyOutcome::Created(info))
         }
         KeyRequest::ResumeOrCreate { key_id, provision } => {
-            match backend.identify(&session.owner, &key_id) {
+            match backend.identify(&session.owner, &key_id).await {
                 Ok(info) => Ok(KeyOutcome::Resumed(info)),
                 // The key is gone (or not ours): mint a replacement, atomically.
                 Err(BackendError::UnknownKey) => {
-                    let info = provision_key(backend, session, provision)?;
+                    let info = provision_key(backend, session, provision).await?;
                     Ok(KeyOutcome::Created(info))
                 }
                 Err(error) => Err(handshake_reject_from(error)),
@@ -289,7 +308,7 @@ fn establish_key(
     }
 }
 
-fn provision_key(
+async fn provision_key(
     backend: &dyn Backend,
     session: &Session,
     request: tpmd_proto::ProvisionRequest,
@@ -302,10 +321,11 @@ fn provision_key(
     .map_err(handshake_reject_from)?;
     backend
         .provision(&session.owner, request.algorithm, level)
+        .await
         .map_err(handshake_reject_from)
 }
 
-fn dispatch(backend: &dyn Backend, session: &Session, op: Op) -> Result<Reply, ErrorReply> {
+async fn dispatch(backend: &dyn Backend, session: &Session, op: Op) -> Result<Reply, ErrorReply> {
     match op {
         Op::Status => Ok(Reply::Status(Status {
             daemon: DAEMON_VERSION.to_owned(),
@@ -325,12 +345,14 @@ fn dispatch(backend: &dyn Backend, session: &Session, op: Op) -> Result<Reply, E
             .map_err(reply_error_from)?;
             let info = backend
                 .provision(&session.owner, request.algorithm, level)
+                .await
                 .map_err(reply_error_from)?;
             Ok(Reply::KeyId(info.key_id))
         }
         Op::Describe { key_id } => {
             let info = backend
                 .identify(&session.owner, &key_id)
+                .await
                 .map_err(reply_error_from)?;
             Ok(Reply::KeyInfo(info))
         }
@@ -347,12 +369,14 @@ fn dispatch(backend: &dyn Backend, session: &Session, op: Op) -> Result<Reply, E
             }
             let signature = backend
                 .sign(&session.owner, &key_id, &message)
+                .await
                 .map_err(reply_error_from)?;
             Ok(Reply::Signature(signature))
         }
         Op::Destroy { key_id } => {
             backend
                 .destroy(&session.owner, &key_id)
+                .await
                 .map_err(reply_error_from)?;
             Ok(Reply::Destroyed)
         }

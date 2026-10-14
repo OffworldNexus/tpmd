@@ -11,12 +11,15 @@ repository.workspace = true
 [dependencies]
 tpmd-proto.workspace = true
 tpmd-backend.workspace = true
+tpmd-store.workspace = true
 tpmd-ipc.workspace = true
-rusqlite.workspace = true
+async-trait.workspace = true
+sea-orm.workspace = true
 p256.workspace = true
 getrandom.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+tokio.workspace = true
 tempfile.workspace = true

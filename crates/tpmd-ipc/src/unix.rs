@@ -31,8 +31,15 @@ pub fn user_socket_path() -> PathBuf {
 /// A leftover socket file is unlinked only if nothing answers on it; a live
 /// listener is surfaced as [`io::ErrorKind::AlreadyExists`] so a second daemon
 /// refuses to start rather than stealing the endpoint.
-pub async fn bind(path: &Path) -> io::Result<UnixListener> {
-    if let Some(dir) = path.parent() {
+///
+/// The containing directory is only created (and forced `0700`) for an
+/// owner-only socket. A system socket lives in a directory the *deployment*
+/// owns — `/run` is `root:root 0755` — so the daemon must not rewrite its
+/// mode; if that directory does not exist, binding fails loudly instead.
+pub async fn bind(path: &Path, access: crate::SocketAccess) -> io::Result<UnixListener> {
+    if access == crate::SocketAccess::Owner
+        && let Some(dir) = path.parent()
+    {
         secure_fs::ensure_dir(dir)?;
     }
     if path.exists() {
@@ -50,7 +57,7 @@ pub async fn bind(path: &Path) -> io::Result<UnixListener> {
         }
     }
     let listener = UnixListener::bind(path)?;
-    secure_fs::restrict_socket(path)?;
+    secure_fs::restrict_socket(path, access)?;
     Ok(listener)
 }
 
@@ -66,4 +73,16 @@ pub async fn connect(path: &Path) -> io::Result<UnixStream> {
 pub fn peer_principal(stream: &UnixStream) -> io::Result<String> {
     let cred = stream.peer_cred()?;
     Ok(format!("uid:{}", cred.uid()))
+}
+
+/// The process's effective UID where the platform exposes it.
+///
+/// Read from `/proc/self`'s ownership rather than a `geteuid()` syscall: on
+/// Linux `proc(5)` guarantees the directory is owned by the effective UID of
+/// the process, so this is exact and needs no `unsafe`. macOS has no `/proc`,
+/// so this returns `None` there — callers treat that as "not root", which is
+/// the safe direction.
+pub fn effective_uid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata("/proc/self").ok().map(|meta| meta.uid())
 }

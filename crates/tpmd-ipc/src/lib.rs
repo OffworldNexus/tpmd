@@ -47,6 +47,47 @@ pub const SOCKET_FILE_NAME: &str = "tpmd.sock";
 /// Path of the Linux system-wide socket used by a shared daemon.
 pub const SYSTEM_SOCKET_PATH: &str = "/run/tpmd.sock";
 
+/// How reachable a bound local socket is to other local users.
+///
+/// Reachability is **not** authorization: whichever mode is chosen, every
+/// operation is scoped to the caller's kernel-authenticated principal. The
+/// mode only decides whether a foreign user can open the socket and be told
+/// `unknown_key` versus being refused the connection outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketAccess {
+    /// Owner-only: the per-user daemon's socket (`0600` on Unix).
+    Owner,
+    /// Any local user may connect: a shared system daemon's socket (`0666` on
+    /// Unix, where `/run` is world-traversable and the daemon runs as `tss`).
+    LocalUsers,
+}
+
+impl SocketAccess {
+    /// The Unix mode this access level maps to.
+    #[cfg(unix)]
+    pub const fn socket_mode(self) -> u32 {
+        match self {
+            SocketAccess::Owner => 0o600,
+            SocketAccess::LocalUsers => 0o666,
+        }
+    }
+}
+
+/// The process's effective UID, where the platform exposes it.
+///
+/// Only the daemon's system-mode auto-detection uses this (root ⇒ shared
+/// daemon). `None` means "not determinable" and is treated as non-root.
+pub fn effective_uid() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        unix::effective_uid()
+    }
+    #[cfg(windows)]
+    {
+        None
+    }
+}
+
 /// Where a client or daemon connects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Endpoint {
@@ -153,11 +194,16 @@ impl Listener {
     /// # Errors
     /// Returns `AlreadyExists` when another daemon is already listening on
     /// the endpoint.
-    pub async fn bind(endpoint: Endpoint) -> io::Result<Listener> {
+    pub async fn bind(endpoint: Endpoint, access: SocketAccess) -> io::Result<Listener> {
+        // On Windows the access policy is carried by the pipe's own DACL at
+        // creation, not by a mode, so the parameter is intentionally unused.
+        #[cfg(windows)]
+        let _ = access;
+
         match endpoint {
             #[cfg(unix)]
             Endpoint::UnixSocket(path) => {
-                let listener = unix::bind(&path).await?;
+                let listener = unix::bind(&path, access).await?;
                 Ok(Listener::Unix { listener, path })
             }
             #[cfg(windows)]

@@ -17,7 +17,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use tpmd_client::{Client, KeyOutcome, KeyRequest, ProvisionRequest};
-use tpmd_ipc::Endpoint;
+use tpmd_ipc::{Endpoint, SocketAccess};
 use tpmd_proto::{Algorithm, SecurityLevel};
 
 fn other_user() -> Option<String> {
@@ -55,6 +55,10 @@ async fn spawn_daemon(dir: &Path) -> Endpoint {
         endpoint: endpoint.clone(),
         state_dir: dir.to_path_buf(),
         default_min_security: SecurityLevel::Sealed,
+        // Pin the dummy: the isolation guarantee under test is backend-agnostic,
+        // and this keeps the test independent of TPM availability.
+        backend: Some("dummy".to_owned()),
+        socket_access: SocketAccess::Owner,
     };
     let _handle = tokio::spawn(tpmd::run(config));
     // Leak the handle: the daemon should run until the test process ends.

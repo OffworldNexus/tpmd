@@ -20,10 +20,12 @@ Read, in order:
 | Crate | Role |
 | --- | --- |
 | `tpmd-proto` | Messages + Postcard frame codec. No OS/storage deps. |
-| `tpmd-backend` | `Backend` trait, security levels, error taxonomy. |
+| `tpmd-backend` | `Backend` trait (async, object-safe), security levels, error taxonomy, `can_be_used`. |
+| `tpmd-store` | SeaORM entities + migrations for the single shared SQLite file. |
 | `tpmd-backend-dummy` | SQLite P-256 store (level `file`). |
+| `tpmd-backend-linux-tpm` | Linux TPM 2.0 store (levels `sealed`, `hardware`); hand-rolled transport. |
 | `tpmd-ipc` | Local endpoints, caller auth, secure filesystem, framed I/O. |
-| `tpmd` | The daemon and its CLI. |
+| `tpmd` | The daemon, its backend registry and its CLI. |
 | `tpmd-client` | Consumer API. |
 | `tpmd-demo` | Toy consumer. |
 
@@ -37,12 +39,14 @@ Read, in order:
   (`winutil`) is the only place `unsafe` is allowed.
 - Every public item is documented (`#![warn(missing_docs)]`); comments explain
   **why**, not what.
-- Backends are one crate per mechanism, feature/target-gated, so a build for
-  one OS never compiles another platform's backend.
+- Backends are one crate per mechanism, gated so a build for one OS never
+  compiles another platform's backend; **what is built** is compile-time, **what
+  is used** is chosen at run time via `can_be_used()` + `default_level()`, with
+  `--backend` to force one.
 
 ## Testing
 
-- Full suite (fast): `cargo test --workspace --all-targets -q` (~5s warm; sub-second test execution once built, timeout 600000ms).
+- Full suite (fast): `cargo test --workspace --all-targets -q` (~2s warm; sub-second test execution once built, timeout 900000ms).
 - Single crate: `cargo test -p tpmd-proto -q` (~10s, timeout 120000ms).
 - Single test: `cargo test -p tpmd --test daemon <name> -q` (~5s, timeout 120000ms).
 - Static analysis, in order:
@@ -53,11 +57,26 @@ Read, in order:
   `cargo check -p tpmd-ipc --target x86_64-pc-windows-msvc`.
 - Always: redirect output to a temp file; silent on success; dump failures only.
 - CI runs the full suite on `ubuntu-latest`, `windows-latest` and `macos-latest`.
-- Last measured: 2026-10-14, full suite ~5s warm (36 tests; cold includes a full rebuild).
+- Last measured: 2026-10-14, full suite ~2s warm (60 tests, 5 of which
+  self-skip without TPM access; cold includes a full rebuild).
 
 The cross-user test (`crates/tpmd/tests/cross_user.rs`) needs a second OS
 account — `TPMD_TEST_OTHER_USER` (default `tpmdtest`) — and passwordless
 `sudo -n`; it skips itself otherwise.
+
+The Linux TPM tests (`crates/tpmd-backend-linux-tpm/tests/device.rs`) need a
+real TPM and rights to open `/dev/tpmrm*` (usually the `tss` group). They
+**self-skip** when the device cannot be opened, so CI stays green on the
+TPM-less runners. To run them locally:
+
+```sh
+cargo test -p tpmd-backend-linux-tpm --all-targets --no-run
+sudo ./target/debug/deps/device-<hash>          # or: sudo -g tss …
+```
+
+`tpm2-tools` is used only as a development reference for the TPM wire format;
+it is **not** a build or runtime dependency (the transport is hand-rolled).
+The daemon's store is one SeaORM-managed SQLite file in WAL mode.
 
 ## Anti-patterns
 

@@ -1,4 +1,4 @@
-//! The dummy backend: a SQLite database holding software P-256 keys.
+//! The dummy backend: software P-256 keys in the shared SQLite store.
 //!
 //! This is the first, universal rung of the security ladder. It reports
 //! security level [`SecurityLevel::File`] and nothing stronger: the private
@@ -8,27 +8,29 @@
 //! Two rules from the architecture document are enforced here:
 //!
 //! * **Ownership.** Every key is addressed by `(principal, namespace,
-//!   key_id)`, all three of which are part of the table's primary key. A
-//!   lookup under the wrong principal or namespace is indistinguishable from
-//!   a key that does not exist ([`BackendError::UnknownKey`]).
+//!   key_id)`, all three of which are part of the primary key. A lookup under
+//!   the wrong principal or namespace is indistinguishable from a key that
+//!   does not exist ([`BackendError::UnknownKey`]).
 //! * **Never weaken silently.** A request to provision at any level other
 //!   than `file` is refused rather than downgraded.
+//!
+//! The storage itself (schema, migrations, connection, file protection) lives
+//! in `tpmd-store`, because the TPM backend shares the same file.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
+use async_trait::async_trait;
 use p256::ecdsa::SigningKey;
 use p256::ecdsa::signature::Signer as _;
 use p256::elliptic_curve::sec1::ToSec1Point as _;
-use rusqlite::{Connection, OptionalExtension, params};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use tpmd_backend::{Backend, BackendError, Owner};
 use tpmd_proto::{Algorithm, KeyId, KeyInfo, SecurityLevel, Signature};
-
-/// File name of the SQLite database inside the state directory.
-pub const DATABASE_FILE_NAME: &str = "keys.sqlite";
+use tpmd_store::entities::keys;
+use tpmd_store::map_db_error;
 
 /// The only security level this backend can achieve.
 const LEVELS: &[SecurityLevel] = &[SecurityLevel::File];
@@ -36,58 +38,27 @@ const LEVELS: &[SecurityLevel] = &[SecurityLevel::File];
 /// The only algorithm this backend can offer.
 const ALGORITHMS: &[Algorithm] = &[Algorithm::EcdsaP256Sha256];
 
-/// `journal_mode=TRUNCATE` keeps the rollback journal short-lived (unlike WAL,
-/// whose `-wal`/`-shm` sidecars persist), so there is less to protect on disk.
-/// The containing directory is `0700`, so any sidecar is owner-only anyway.
-const SCHEMA: &str = "
-PRAGMA journal_mode = TRUNCATE;
-CREATE TABLE IF NOT EXISTS keys (
-    principal    TEXT    NOT NULL,
-    namespace    TEXT    NOT NULL,
-    key_id       BLOB    NOT NULL,
-    algorithm    INTEGER NOT NULL,
-    level        INTEGER NOT NULL,
-    secret       BLOB    NOT NULL,
-    created_unix INTEGER NOT NULL,
-    PRIMARY KEY (principal, namespace, key_id)
-) WITHOUT ROWID;
-";
-
-/// A software P-256 store backed by SQLite.
+/// A software P-256 store backed by the shared SQLite database.
 ///
-/// Access is serialised behind a mutex: SQLite connections are not
-/// `Sync`, and signing operations are microseconds long.
+/// A `DatabaseConnection` is `Clone + Send + Sync`, so — unlike the raw
+/// connection it replaced — it needs no mutex and the backend is trivially
+/// shareable across the daemon's connection tasks.
 pub struct DummyBackend {
-    conn: Mutex<Connection>,
+    db: DatabaseConnection,
     db_path: PathBuf,
 }
 
 impl DummyBackend {
-    /// Open (creating if needed) the store under `state_dir`.
+    /// Open (creating and migrating if needed) the shared store under
+    /// `state_dir`.
     ///
     /// The directory is created `0700` and the database file forced `0600` (a
     /// protected owner-only DACL on Windows).
-    pub fn open(state_dir: &Path) -> Result<Self, BackendError> {
-        tpmd_ipc::secure_fs::ensure_dir(state_dir)
-            .map_err(|e| BackendError::Unavailable(format!("creating state dir: {e}")))?;
-
-        let db_path = state_dir.join(DATABASE_FILE_NAME);
-        let conn = Connection::open(&db_path).map_err(|e| {
-            BackendError::Unavailable(format!("opening {}: {e}", db_path.display()))
-        })?;
-
-        // Restrict the database file itself. The directory is already 0700, so
-        // SQLite's transient journal sidecars are covered too.
-        tpmd_ipc::secure_fs::restrict_file(&db_path).map_err(|e| {
-            BackendError::Unavailable(format!("restricting {}: {e}", db_path.display()))
-        })?;
-
-        conn.execute_batch(SCHEMA)
-            .map_err(|e| BackendError::Unavailable(format!("initialising schema: {e}")))?;
-
+    pub async fn open(state_dir: &Path) -> Result<Self, BackendError> {
+        let db = tpmd_store::open(state_dir).await?;
         Ok(Self {
-            conn: Mutex::new(conn),
-            db_path,
+            db,
+            db_path: tpmd_store::database_path(state_dir),
         })
     }
 
@@ -95,14 +66,18 @@ impl DummyBackend {
     pub fn db_path(&self) -> &Path {
         &self.db_path
     }
-
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, BackendError> {
-        self.conn
-            .lock()
-            .map_err(|_| BackendError::Internal("key store mutex was poisoned".into()))
-    }
 }
 
+/// The composite primary key of a key row.
+fn row_id(owner: &Owner, key_id: &KeyId) -> (String, String, Vec<u8>) {
+    (
+        owner.principal.as_str().to_owned(),
+        owner.namespace.clone(),
+        key_id.as_bytes().to_vec(),
+    )
+}
+
+#[async_trait]
 impl Backend for DummyBackend {
     fn name(&self) -> &'static str {
         "dummy"
@@ -116,7 +91,7 @@ impl Backend for DummyBackend {
         LEVELS
     }
 
-    fn provision(
+    async fn provision(
         &self,
         owner: &Owner,
         algorithm: Algorithm,
@@ -137,21 +112,20 @@ impl Backend for DummyBackend {
 
         let (secret, key_id) = generate_key()?;
         let created_unix = now_unix();
-        let conn = self.lock()?;
-        conn.execute(
-            "INSERT INTO keys (principal, namespace, key_id, algorithm, level, secret, created_unix)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                owner.principal.as_str(),
-                owner.namespace,
-                key_id.as_bytes(),
-                algorithm_index(algorithm),
-                level_index(level),
-                secret.as_slice(),
-                created_unix,
-            ],
-        )
-        .map_err(|e| BackendError::Internal(format!("inserting key: {e}")))?;
+        let (principal, namespace, id) = row_id(owner, &key_id);
+
+        keys::ActiveModel {
+            principal: Set(principal),
+            namespace: Set(namespace),
+            key_id: Set(id),
+            algorithm: Set(algorithm_index(algorithm)),
+            level: Set(level_index(level)),
+            secret: Set(secret.to_vec()),
+            created_unix: Set(created_unix),
+        }
+        .insert(&self.db)
+        .await
+        .map_err(|e| map_db_error("inserting key", e))?;
 
         Ok(KeyInfo {
             key_id,
@@ -161,76 +135,64 @@ impl Backend for DummyBackend {
         })
     }
 
-    fn identify(&self, owner: &Owner, key_id: &KeyId) -> Result<KeyInfo, BackendError> {
-        let conn = self.lock()?;
-        let row = conn
-            .query_row(
-                "SELECT algorithm, level, created_unix FROM keys
-                 WHERE principal = ?1 AND namespace = ?2 AND key_id = ?3",
-                params![owner.principal.as_str(), owner.namespace, key_id.as_bytes()],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|e| BackendError::Internal(format!("querying key: {e}")))?;
+    async fn identify(&self, owner: &Owner, key_id: &KeyId) -> Result<KeyInfo, BackendError> {
+        let row = keys::Entity::find_by_id(row_id(owner, key_id))
+            .one(&self.db)
+            .await
+            .map_err(|e| map_db_error("querying key", e))?
+            .ok_or(BackendError::UnknownKey)?;
 
-        let (algorithm, level, created_unix) = row.ok_or(BackendError::UnknownKey)?;
         Ok(KeyInfo {
             key_id: *key_id,
-            algorithm: algorithm_from_index(algorithm)?,
-            security_level: level_from_index(level)?,
-            created_unix,
+            algorithm: algorithm_from_index(row.algorithm)?,
+            security_level: level_from_index(row.level)?,
+            created_unix: row.created_unix,
         })
     }
 
-    fn sign(
+    async fn sign(
         &self,
         owner: &Owner,
         key_id: &KeyId,
         message: &[u8],
     ) -> Result<Signature, BackendError> {
-        let sec1 = key_id_bytes(key_id)?;
-        let secret: Vec<u8> = {
-            let conn = self.lock()?;
-            conn.query_row(
-                "SELECT secret FROM keys
-                 WHERE principal = ?1 AND namespace = ?2 AND key_id = ?3",
-                params![owner.principal.as_str(), owner.namespace, sec1],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| BackendError::Internal(format!("querying key: {e}")))?
-            .ok_or(BackendError::UnknownKey)?
-        };
+        let row = keys::Entity::find_by_id(row_id(owner, key_id))
+            .one(&self.db)
+            .await
+            .map_err(|e| map_db_error("querying key", e))?
+            .ok_or(BackendError::UnknownKey)?;
 
+        let mut secret = row.secret;
         let signing_key = SigningKey::from_slice(&secret)
             .map_err(|e| BackendError::KeyLoss(format!("stored scalar is invalid: {e}")))?;
         // `Signer::sign` applies SHA-256 to `message` internally, which is
         // exactly the contract weaver_mux::auth::verify expects.
         let signature: p256::ecdsa::Signature = signing_key.sign(message);
+        // The scalar was only in memory for the duration of the signature.
+        zeroize_secret(&mut secret);
+
         let mut out = [0u8; 64];
         out.copy_from_slice(&signature.to_bytes());
         Ok(Signature::P256(out))
     }
 
-    fn destroy(&self, owner: &Owner, key_id: &KeyId) -> Result<(), BackendError> {
-        let conn = self.lock()?;
-        let removed = conn
-            .execute(
-                "DELETE FROM keys WHERE principal = ?1 AND namespace = ?2 AND key_id = ?3",
-                params![owner.principal.as_str(), owner.namespace, key_id.as_bytes()],
-            )
-            .map_err(|e| BackendError::Internal(format!("deleting key: {e}")))?;
-        if removed == 0 {
+    async fn destroy(&self, owner: &Owner, key_id: &KeyId) -> Result<(), BackendError> {
+        let result = keys::Entity::delete_by_id(row_id(owner, key_id))
+            .exec(&self.db)
+            .await
+            .map_err(|e| map_db_error("deleting key", e))?;
+        if result.rows_affected == 0 {
             return Err(BackendError::UnknownKey);
         }
         Ok(())
     }
+}
+
+/// Overwrite a scalar in place. The dummy keeps software keys regardless, so
+/// this is hygiene rather than a control, but leaving a scalar lying in a
+/// freed allocation costs nothing to avoid.
+fn zeroize_secret(secret: &mut [u8]) {
+    secret.fill(0);
 }
 
 /// Draw a fresh P-256 secret scalar and derive its compressed public key.
@@ -252,12 +214,6 @@ fn generate_key() -> Result<([u8; 32], KeyId), BackendError> {
     Err(BackendError::Internal(
         "failed to draw a valid P-256 scalar in 16 attempts".into(),
     ))
-}
-
-fn key_id_bytes(key_id: &KeyId) -> Result<&[u8], BackendError> {
-    match key_id {
-        KeyId::P256(bytes) => Ok(bytes),
-    }
 }
 
 /// Wire enum indices, persisted as integers. These are coupled to the order of
@@ -315,52 +271,56 @@ mod tests {
         Owner::new(tpmd_backend::Principal(principal.into()), namespace)
     }
 
-    fn backend() -> (tempfile::TempDir, DummyBackend) {
+    async fn backend() -> (tempfile::TempDir, DummyBackend) {
         let dir = tempfile::tempdir().unwrap();
-        let backend = DummyBackend::open(dir.path()).unwrap();
+        let backend = DummyBackend::open(dir.path()).await.unwrap();
         (dir, backend)
     }
 
-    #[test]
-    fn provision_reports_file_level_and_a_33_byte_fingerprint() {
-        let (_dir, backend) = backend();
+    #[tokio::test]
+    async fn provision_reports_file_level_and_a_33_byte_fingerprint() {
+        let (_dir, backend) = backend().await;
         let info = backend
             .provision(
                 &owner("uid:1000", "app"),
                 Algorithm::EcdsaP256Sha256,
                 SecurityLevel::File,
             )
+            .await
             .unwrap();
         assert_eq!(info.security_level, SecurityLevel::File);
         assert_eq!(info.key_id.as_bytes().len(), 33);
     }
 
-    #[test]
-    fn provision_refuses_a_stronger_level() {
-        let (_dir, backend) = backend();
+    #[tokio::test]
+    async fn provision_refuses_a_stronger_level() {
+        let (_dir, backend) = backend().await;
         let err = backend
             .provision(
                 &owner("uid:1000", "app"),
                 Algorithm::EcdsaP256Sha256,
                 SecurityLevel::Sealed,
             )
+            .await
             .unwrap_err();
         assert!(matches!(err, BackendError::IncompatiblePolicy { .. }));
     }
 
-    #[test]
-    fn signatures_verify_independently() {
-        let (_dir, backend) = backend();
+    #[tokio::test]
+    async fn signatures_verify_independently() {
+        let (_dir, backend) = backend().await;
         let info = backend
             .provision(
                 &owner("uid:1000", "app"),
                 Algorithm::EcdsaP256Sha256,
                 SecurityLevel::File,
             )
+            .await
             .unwrap();
         let message = b"weaver-mux-v1 transcript bytes";
         let signature = backend
             .sign(&owner("uid:1000", "app"), &info.key_id, message)
+            .await
             .unwrap();
 
         // Verify with the p256 crate directly, not with tpmd's own code path.
@@ -372,79 +332,104 @@ mod tests {
         assert!(verifying.verify(b"different transcript", &sig).is_err());
     }
 
-    #[test]
-    fn keys_are_scoped_to_principal_and_namespace() {
-        let (_dir, backend) = backend();
+    #[tokio::test]
+    async fn keys_are_scoped_to_principal_and_namespace() {
+        let (_dir, backend) = backend().await;
         let info = backend
             .provision(
                 &owner("uid:1000", "app"),
                 Algorithm::EcdsaP256Sha256,
                 SecurityLevel::File,
             )
+            .await
             .unwrap();
 
         // Same key id, different principal: unknown.
         assert!(matches!(
-            backend.identify(&owner("uid:2000", "app"), &info.key_id),
+            backend
+                .identify(&owner("uid:2000", "app"), &info.key_id)
+                .await,
             Err(BackendError::UnknownKey)
         ));
         // Different namespace: unknown.
         assert!(matches!(
-            backend.identify(&owner("uid:1000", "other"), &info.key_id),
+            backend
+                .identify(&owner("uid:1000", "other"), &info.key_id)
+                .await,
             Err(BackendError::UnknownKey)
         ));
         // Signing under the wrong owner is refused too.
         assert!(matches!(
-            backend.sign(&owner("uid:2000", "app"), &info.key_id, b"x"),
+            backend
+                .sign(&owner("uid:2000", "app"), &info.key_id, b"x")
+                .await,
             Err(BackendError::UnknownKey)
         ));
     }
 
-    #[test]
-    fn keys_survive_reopening_the_store() {
+    #[tokio::test]
+    async fn keys_survive_reopening_the_store() {
         let dir = tempfile::tempdir().unwrap();
         let info = {
-            let backend = DummyBackend::open(dir.path()).unwrap();
+            let backend = DummyBackend::open(dir.path()).await.unwrap();
             backend
                 .provision(
                     &owner("uid:1000", "app"),
                     Algorithm::EcdsaP256Sha256,
                     SecurityLevel::File,
                 )
+                .await
                 .unwrap()
         };
 
-        let reopened = DummyBackend::open(dir.path()).unwrap();
+        let reopened = DummyBackend::open(dir.path()).await.unwrap();
         let found = reopened
             .identify(&owner("uid:1000", "app"), &info.key_id)
+            .await
             .unwrap();
         assert_eq!(found.key_id, info.key_id);
     }
 
-    #[test]
-    fn destroy_removes_and_then_reports_unknown() {
-        let (_dir, backend) = backend();
+    #[tokio::test]
+    async fn destroy_removes_and_then_reports_unknown() {
+        let (_dir, backend) = backend().await;
         let info = backend
             .provision(
                 &owner("uid:1000", "app"),
                 Algorithm::EcdsaP256Sha256,
                 SecurityLevel::File,
             )
+            .await
             .unwrap();
         backend
             .destroy(&owner("uid:1000", "app"), &info.key_id)
+            .await
             .unwrap();
         assert!(matches!(
-            backend.destroy(&owner("uid:1000", "app"), &info.key_id),
+            backend
+                .destroy(&owner("uid:1000", "app"), &info.key_id)
+                .await,
             Err(BackendError::UnknownKey)
         ));
     }
 
+    /// Durability under concurrency depends on WAL: with the old rollback
+    /// journal a reader could block the writer.
+    #[tokio::test]
+    async fn store_uses_wal_journaling() {
+        let (_dir, backend) = backend().await;
+        let mode: String = sea_orm::sqlx::query_scalar("PRAGMA journal_mode;")
+            .fetch_one(backend.db.get_sqlite_connection_pool())
+            .await
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+    }
+
     #[cfg(unix)]
-    #[test]
-    fn database_is_owner_only() {
+    #[tokio::test]
+    async fn database_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        let (dir, backend) = backend();
+        let (dir, backend) = backend().await;
         let db_mode = std::fs::metadata(backend.db_path())
             .unwrap()
             .permissions()

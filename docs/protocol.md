@@ -161,9 +161,17 @@ stateDiagram-v2
 | Windows | `\\.\pipe\tpmd-<hash-of-SID>` | — | named-pipe client token SID |
 
 The `tpmd-client` **looks for the user-scoped endpoint first, then the
-system endpoint**. There is **no TCP listener**. The endpoint lives in a
-directory only the owning user (and, for a shared daemon, the daemon account)
-may enter.
+system endpoint**. There is **no TCP listener**. The user-scoped endpoint lives
+in a directory only the owning user may enter (dir `0700`, socket `0600`).
+
+The **system** socket is deliberately reachable by any local user: `/run/tpmd.sock`
+is mode `0666`, and clients need no `tss` group membership (they never open the
+TPM). Reachability is **not** authorization — every operation is scoped to the
+caller's kernel-derived principal, so a foreign user connecting to the shared
+socket is answered `unknown_key`, not given access. The deployment provision the
+socket's directory (systemd `RuntimeDirectory=`, `tmpfiles.d`, or the installer);
+the daemon binds the path and applies the mode, and fails loudly if the
+directory is missing.
 
 ### 6.2 Frame
 
@@ -472,16 +480,21 @@ Hardware > Sealed > Keyring > File
 - The dummy backend achieves only **`file`**, so with the default floor
   provision/establish fails with `incompatible_policy` unless the caller
   passes `allow_below_floor = true`.
+- The Linux TPM backend (`linux-tpm`) achieves **`sealed`** and **`hardware`**,
+  so on a machine with a usable TPM the default `sealed` floor is met without
+  consent. Selection prefers the strongest usable backend, so `hardware` is
+  chosen whenever the TPM can create an ECC child.
 - The demo and tests opt in at `file`, proving both the refusal and the
   consented path.
 - The daemon reports the *achieved* level truthfully in `WELCOME`, `status`,
-  and `KeyInfo` — never `sealed`/`keyring`/`hardware` for the dummy.
+  and `KeyInfo` — never `sealed`/`keyring`/`hardware` for the dummy, and never
+  a level a key was not actually created at.
 
-Dummy storage protection:
+Store protection (one SQLite file shared by every backend):
 
 | Platform | Protection |
 | --- | --- |
-| Unix | DB file `0600`, containing dir `0700`, plus SQLite `-journal`/`-wal`/`-shm` sidecars restricted |
+| Unix | DB file `0600`, containing dir `0700`; the `-wal`/`-shm` sidecars live in that directory, so they are covered by the same rule |
 | Windows | owner-only DACL on file and directory |
 
 ## 12. Does this accomplish Tunnel Weaver's goals?
