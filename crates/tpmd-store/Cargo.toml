@@ -1,0 +1,19 @@
+[package]
+name = "tpmd-store"
+description = "SeaORM-managed SQLite store shared by every tpmd backend."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tpmd-backend.workspace = true
+tpmd-ipc.workspace = true
+sea-orm.workspace = true
+sea-orm-migration.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true

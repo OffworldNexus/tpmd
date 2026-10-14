@@ -1,15 +1,17 @@
 //! A toy consumer for tpmd.
 //!
 //! It walks the whole key life-cycle Tunnel Weaver needs, with a simulated
-//! relay, and never touches Tunnel Weaver itself: discover capabilities; hit
-//! the default `sealed` floor and see the refusal; provision at `file` with
-//! explicit consent; enrol the public key with a simulated relay; sign a
-//! handshake transcript and verify it independently; permit an agent restart
-//! and resume the same identity; destroy and re-create; and show
-//! representative failures.
+//! relay, and never touches Tunnel Weaver itself: discover capabilities; watch
+//! the default `sealed` floor enforced (refused by the dummy, already met on a
+//! TPM); provision a key at the strongest level the selected backend offers;
+//! enrol the public key with a simulated relay; sign a handshake transcript and
+//! verify it independently; permit an agent restart and resume the same
+//! identity; destroy and re-create; and show representative failures.
 //!
 //! `run` is self-contained: it starts and restarts the real `tpmd` binary
 //! (found next to this executable), so a few commands demonstrate everything.
+//! `run --sudo` starts that agent as root instead (Linux only), which is the
+//! usual way to reach the TPM backend without changing your shell's identity.
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -50,7 +52,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Full self-contained life-cycle: spawns and restarts the agent.
-    Run,
+    Run {
+        /// Start the agent as root through `sudo`, so the Linux TPM backend can
+        /// open `/dev/tpmrm*` (`tss:tss 0660`). Linux only.
+        #[arg(long)]
+        sudo: bool,
+    },
     /// Connect without a key and print the capability announce.
     Probe,
     /// Create a key at the file floor and print its fingerprint.
@@ -97,7 +104,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         command,
     } = cli;
     match command {
-        Command::Run => run_lifecycle(state_dir).await,
+        Command::Run { sudo } => run_lifecycle(state_dir, sudo).await,
         Command::Probe => {
             let mut client = connect_probe(&socket, &namespace).await?;
             print_welcome(client.welcome());
@@ -145,7 +152,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
 }
 
 /// The full self-contained walk-through.
-async fn run_lifecycle(state_dir: Option<PathBuf>) -> Result<()> {
+async fn run_lifecycle(state_dir: Option<PathBuf>, sudo: bool) -> Result<()> {
+    if sudo && !cfg!(target_os = "linux") {
+        return Err("--sudo is only available on Linux".into());
+    }
+
     // Hold the tempdir alive for the whole run so a restart reuses the store.
     let (workdir, _temporary) = match state_dir {
         Some(dir) => (dir, None),
@@ -159,7 +170,7 @@ async fn run_lifecycle(state_dir: Option<PathBuf>) -> Result<()> {
     println!("work dir  : {}", workdir.display());
 
     // 1. Start the agent.
-    let mut agent = Agent::start(&workdir).await?;
+    let mut agent = Agent::start(&workdir, sudo).await?;
     let endpoint = agent.endpoint.clone();
     println!("\n[1] started agent at {}", endpoint.display());
 
@@ -189,8 +200,10 @@ async fn run_lifecycle(state_dir: Option<PathBuf>) -> Result<()> {
         }) => println!(
             "[3] sealed floor correctly refused (required {required}, available {available})"
         ),
+        // A backend that already reaches the floor is not a failure: a usable
+        // TPM satisfies `sealed` without consent, and says so.
+        Ok(_) => println!("[3] sealed floor already met by this backend (no refusal)"),
         Err(other) => return Err(format!("expected a floor refusal, got {other:?}").into()),
-        Ok(_) => return Err("expected a floor refusal, but the handshake succeeded".into()),
     }
 
     // 4. Provision at `file`, with explicit consent.
@@ -228,17 +241,23 @@ async fn run_lifecycle(state_dir: Option<PathBuf>) -> Result<()> {
         return Err("a mutated transcript wrongly verified".into());
     }
     println!("    mutated transcript correctly rejected");
-    // RFC 6979: signing is deterministic.
+    // RFC 6979 makes a *software* signer deterministic. A hardware key signs
+    // inside the TPM with a fresh nonce, so a second signature differs — but it
+    // must still verify.
     let again = client.sign(fingerprint, &transcript).await?;
-    if again != signature {
-        return Err("signing the same message twice produced different signatures".into());
+    relay.verify(&transcript, &again)?;
+    if again == signature {
+        println!("    re-signing is deterministic (software signer)");
+    } else if info.security_level == SecurityLevel::Hardware {
+        println!("    re-signing produced a different, still-valid signature (hardware nonce)");
+    } else {
+        return Err("a software signer should be deterministic".into());
     }
-    println!("    re-signing is deterministic");
 
     // 7. Restart the agent and resume the same identity.
     drop(client);
     agent.stop();
-    agent = Agent::start(&workdir).await?;
+    agent = Agent::start(&workdir, sudo).await?;
     println!("[7] restarted agent");
     let mut client = Client::connect(
         &agent.endpoint,
@@ -320,8 +339,9 @@ async fn demonstrate_errors(socket: &Option<PathBuf>, namespace: &str) -> Result
             code: RejectCode::IncompatiblePolicy,
             ..
         }) => println!("rejected floor      -> reported"),
+        // A backend that already meets the floor cannot demonstrate a refusal.
+        Ok(_) => println!("rejected floor      -> not applicable: this backend meets the floor"),
         Err(other) => return Err(format!("expected a floor refusal, got {other:?}").into()),
-        Ok(_) => return Err("expected a floor refusal, but the handshake succeeded".into()),
     }
 
     // Unknown key: sign with a fingerprint the daemon has never seen.
@@ -376,14 +396,31 @@ fn weaver_transcript() -> Vec<u8> {
 struct Agent {
     child: Child,
     endpoint: Endpoint,
+    /// Whether the daemon was started through `sudo` (and is therefore a
+    /// grandchild of this process). `--sudo` is Linux-only, so the field is too.
+    #[cfg(target_os = "linux")]
+    via_sudo: bool,
 }
 
 impl Agent {
-    async fn start(workdir: &Path) -> Result<Self> {
+    async fn start(workdir: &Path, sudo: bool) -> Result<Self> {
         let binary = daemon_binary().ok_or(
             "cannot find the `tpmd` binary next to `tpmd-demo`; run `cargo build --workspace` first",
         )?;
-        let mut command = ProcCommand::new(binary);
+
+        let mut command = if sudo {
+            // Run the daemon in a session of its own. Without `setsid`, `sudo`
+            // takes over this process's controlling terminal: it writes a
+            // stray NUL byte and clears ONLCR, which leaves the caller's
+            // terminal printing a staircase. A detached session has no
+            // controlling terminal to hijack — which also means `sudo` cannot
+            // prompt for a password, so `--sudo` expects passwordless sudo.
+            let mut command = ProcCommand::new("setsid");
+            command.arg("sudo").arg(binary);
+            command
+        } else {
+            ProcCommand::new(binary)
+        };
         command
             .arg("serve")
             .arg("--state-dir")
@@ -404,14 +441,36 @@ impl Agent {
                 .await
                 .is_ok()
             {
-                return Ok(Self { child, endpoint });
+                return Ok(Self {
+                    child,
+                    endpoint,
+                    #[cfg(target_os = "linux")]
+                    via_sudo: sudo,
+                });
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        Err("the agent did not become ready in time".into())
+        Err(if sudo {
+            "the agent did not become ready in time (is `sudo` usable without a password prompt?)"
+                .into()
+        } else {
+            "the agent did not become ready in time".into()
+        })
     }
 
     fn stop(&mut self) {
+        // A daemon started through `sudo` is a grandchild: `Child::kill` sends
+        // SIGKILL to `sudo` alone and would orphan a root daemon still holding
+        // the socket, so send SIGTERM instead — `sudo` relays it to the daemon.
+        #[cfg(target_os = "linux")]
+        if self.via_sudo {
+            let _ = ProcCommand::new("kill")
+                .arg("-TERM")
+                .arg(self.child.id().to_string())
+                .status();
+            let _ = self.child.wait();
+            return;
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

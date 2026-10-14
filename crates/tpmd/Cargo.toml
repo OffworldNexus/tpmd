@@ -17,11 +17,17 @@ tpmd-proto.workspace = true
 tpmd-backend.workspace = true
 tpmd-backend-dummy.workspace = true
 tpmd-ipc.workspace = true
+async-trait.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
+
+# The Linux TPM backend is compiled in only on Linux, so a Windows or macOS
+# build never links its code.
+[target.'cfg(target_os = "linux")'.dependencies]
+tpmd-backend-linux-tpm.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

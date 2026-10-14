@@ -3,7 +3,9 @@ resolver = "2"
 members = [
     "crates/tpmd-proto",
     "crates/tpmd-backend",
+    "crates/tpmd-store",
     "crates/tpmd-backend-dummy",
+    "crates/tpmd-backend-linux-tpm",
     "crates/tpmd-ipc",
     "crates/tpmd",
     "crates/tpmd-client",
@@ -23,7 +25,9 @@ repository = "https://github.com/OffworldNexus/tpmd"
 # published later without editing every manifest.
 tpmd-proto = { path = "crates/tpmd-proto", version = "0.1.0" }
 tpmd-backend = { path = "crates/tpmd-backend", version = "0.1.0" }
+tpmd-store = { path = "crates/tpmd-store", version = "0.1.0" }
 tpmd-backend-dummy = { path = "crates/tpmd-backend-dummy", version = "0.1.0" }
+tpmd-backend-linux-tpm = { path = "crates/tpmd-backend-linux-tpm", version = "0.1.0" }
 tpmd-ipc = { path = "crates/tpmd-ipc", version = "0.1.0" }
 tpmd-client = { path = "crates/tpmd-client", version = "0.1.0" }
 
@@ -37,6 +41,9 @@ thiserror = "2.0"
 # Same RustCrypto line as weaver-mux, so signatures produced here verify with
 # weaver_mux::auth::verify byte-for-byte.
 p256 = { version = "0.14", default-features = false, features = ["ecdsa", "alloc"] }
+# Explicit SHA-256 for the hardware path: the TPM signs a pre-computed digest,
+# so we must hash the message ourselves (same 0.10 line `p256` already uses).
+sha2 = "0.10"
 getrandom = "0.3"
 tokio = { version = "1.43", features = [
     "sync",
@@ -49,7 +56,22 @@ tokio = { version = "1.43", features = [
     "rt-multi-thread",
     "io-util",
 ] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+# One SQLite file, shared by every backend, owned by SeaORM. `runtime-tokio`
+# (rather than a `*-tls` runtime) keeps the TLS stack — and its `ring`/`ISC`
+# license — out of the dependency tree; SQLite never speaks the network.
+sea-orm = { version = "2.0", default-features = false, features = [
+    "macros",
+    "sqlx-sqlite",
+    "runtime-tokio",
+] }
+sea-orm-migration = { version = "2.0", default-features = false, features = [
+    "sqlx-sqlite",
+    "runtime-tokio",
+] }
+# Object-safe async trait objects: the daemon stores `Arc<dyn Backend>`.
+async-trait = "0.1"
+# Scrubs the unsealed P-256 scalar from memory on the TPM backend's sealed path.
+zeroize = "1.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 hex = "0.4"

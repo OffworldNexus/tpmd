@@ -1,0 +1,29 @@
+[package]
+name = "tpmd-backend-linux-tpm"
+description = "Linux TPM 2.0 backend (`sealed` and `hardware` levels) for the tpmd local key agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tpmd-proto.workspace = true
+tpmd-backend.workspace = true
+tpmd-store.workspace = true
+tpmd-ipc.workspace = true
+async-trait.workspace = true
+sea-orm.workspace = true
+p256.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true
+p256.workspace = true
+hex.workspace = true

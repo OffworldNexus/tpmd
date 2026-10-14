@@ -10,7 +10,7 @@ use std::time::Duration;
 use p256::ecdsa::VerifyingKey;
 use p256::ecdsa::signature::Verifier as _;
 use tpmd_client::{Client, ClientError, KeyRequest, ProvisionRequest};
-use tpmd_ipc::{Endpoint, read_message, write_message};
+use tpmd_ipc::{Endpoint, SocketAccess, read_message, write_message};
 use tpmd_proto::{
     Algorithm, ErrorCode, ErrorDetail, Hello, KeyId, KeyOutcome, MIN_PROTOCOL_VERSION, Message,
     PROTOCOL_VERSION, RejectCode, SecurityLevel,
@@ -44,6 +44,10 @@ async fn spawn_daemon(
         endpoint: endpoint.clone(),
         state_dir: dir.to_path_buf(),
         default_min_security: SecurityLevel::Sealed,
+        // Pin the dummy: these tests assert `file`-level behaviour, and this
+        // machine has a usable TPM that would otherwise be selected.
+        backend: Some("dummy".to_owned()),
+        socket_access: SocketAccess::Owner,
     };
     let handle = tokio::spawn(tpmd::run(config));
     wait_ready(&endpoint).await;

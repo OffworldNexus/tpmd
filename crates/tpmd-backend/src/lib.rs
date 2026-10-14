@@ -7,13 +7,15 @@
 //! backends must not depend on the daemon — hence a small dedicated crate
 //! rather than putting the trait in the daemon.
 //!
-//! Backends are **synchronous**: a backend call touches a local store and (for
-//! the dummy) does a little ECDSA arithmetic, neither of which warrants an
-//! async runtime inside the backend. The daemon decides how to schedule calls.
+//! Backends are **async**: a backend call may touch a local store (via an
+//! async ORM) or a hardware device, and the daemon already runs on Tokio. The
+//! trait is object-safe through `async-trait` so the daemon can hold an
+//! `Arc<dyn Backend>` regardless of which mechanism was selected.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use async_trait::async_trait;
 use thiserror::Error;
 use tpmd_proto::{Algorithm, KeyId, KeyInfo, SecurityLevel, Signature};
 
@@ -96,6 +98,10 @@ pub enum BackendError {
 }
 
 /// A private-key store plus signing, addressed by principal and namespace.
+///
+/// The trait is object-safe so the daemon can select a mechanism at run time
+/// and still drive it through one `Arc<dyn Backend>`.
+#[async_trait]
 pub trait Backend: Send + Sync {
     /// The backend's short name, e.g. `"dummy"`.
     fn name(&self) -> &'static str;
@@ -105,6 +111,16 @@ pub trait Backend: Send + Sync {
 
     /// Security levels this backend can achieve, weakest first.
     fn levels(&self) -> &'static [SecurityLevel];
+
+    /// Whether this backend can actually be used on this machine right now.
+    ///
+    /// Selection needs to tell "compiled in" from "usable": a TPM backend is
+    /// built on every Linux host but only works where a TPM device can be
+    /// opened. Each backend proves this its own way; the default is a backend
+    /// with no external dependency, which is usable wherever it builds.
+    fn can_be_used(&self) -> bool {
+        true
+    }
 
     /// The strongest level this backend achieves right now.
     ///
@@ -122,7 +138,7 @@ pub trait Backend: Send + Sync {
     ///
     /// The daemon has already chosen `level` via [`select_level`]; the backend
     /// must still refuse a level it cannot provide rather than downgrading.
-    fn provision(
+    async fn provision(
         &self,
         owner: &Owner,
         algorithm: Algorithm,
@@ -130,13 +146,13 @@ pub trait Backend: Send + Sync {
     ) -> Result<KeyInfo, BackendError>;
 
     /// Look up the metadata of a key owned by `owner`.
-    fn identify(&self, owner: &Owner, key_id: &KeyId) -> Result<KeyInfo, BackendError>;
+    async fn identify(&self, owner: &Owner, key_id: &KeyId) -> Result<KeyInfo, BackendError>;
 
     /// Sign `message` with the key named by `key_id`.
     ///
     /// The contract (protocol §10): the backend SHA-256-hashes `message` and
     /// ECDSA-signs the digest, returning raw `r ‖ s`.
-    fn sign(
+    async fn sign(
         &self,
         owner: &Owner,
         key_id: &KeyId,
@@ -144,7 +160,7 @@ pub trait Backend: Send + Sync {
     ) -> Result<Signature, BackendError>;
 
     /// Destroy a key owned by `owner`.
-    fn destroy(&self, owner: &Owner, key_id: &KeyId) -> Result<(), BackendError>;
+    async fn destroy(&self, owner: &Owner, key_id: &KeyId) -> Result<(), BackendError>;
 }
 
 /// Choose the level to provision at, honouring the caller's floor.

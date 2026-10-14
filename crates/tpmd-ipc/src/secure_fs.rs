@@ -28,9 +28,9 @@ mod imp {
         set_mode(path, 0o600)
     }
 
-    /// Force mode `0600` on a socket.
-    pub fn restrict_socket(path: &Path) -> io::Result<()> {
-        set_mode(path, 0o600)
+    /// Force owner-only mode (`0600`) on a socket.
+    pub fn restrict_socket(path: &Path, access: crate::SocketAccess) -> io::Result<()> {
+        set_mode(path, access.socket_mode())
     }
 
     fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
@@ -57,7 +57,7 @@ mod imp {
     }
 
     /// Named pipes carry their own DACL at creation; nothing to do here.
-    pub fn restrict_socket(_path: &Path) -> io::Result<()> {
+    pub fn restrict_socket(_path: &Path, _access: crate::SocketAccess) -> io::Result<()> {
         Ok(())
     }
 }

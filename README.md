@@ -21,10 +21,12 @@ keyring backends arrive in later tickets behind the same interface.
 | Crate | Role |
 | --- | --- |
 | `tpmd-proto` | Serializable messages, Postcard frame codec, limits, version negotiation. No OS or storage dependencies. |
-| `tpmd-backend` | The `Backend` trait, `SecurityLevel`, `Principal` and the error taxonomy. |
+| `tpmd-backend` | The `Backend` trait (async, object-safe), `SecurityLevel`, `Principal` and the error taxonomy. |
+| `tpmd-store` | SeaORM entities and migrations for the one SQLite file every backend shares. |
 | `tpmd-backend-dummy` | SQLite software P-256 store (level `file`). |
+| `tpmd-backend-linux-tpm` | Linux TPM 2.0 store (levels `sealed` and `hardware`), hand-rolled transport, no libtss2. |
 | `tpmd-ipc` | Cross-platform local endpoint: Unix socket, macOS socket, Windows named pipe, with native caller authentication. |
-| `tpmd` | The daemon: serve loop, caller authentication, namespace and floor enforcement, backend selection, CLI. |
+| `tpmd` | The daemon: serve loop, caller authentication, namespace and floor enforcement, backend registry and selection, CLI. |
 | `tpmd-client` | The consumer API, hiding the transport. |
 | `tpmd-demo` | A toy consumer that walks the Tunnel Weaver key life-cycle with a simulated relay. |
 
