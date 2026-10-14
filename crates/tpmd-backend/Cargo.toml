@@ -1,0 +1,13 @@
+[package]
+name = "tpmd-backend"
+description = "Backend trait, security levels and error taxonomy for the tpmd local key agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tpmd-proto.workspace = true
+thiserror.workspace = true

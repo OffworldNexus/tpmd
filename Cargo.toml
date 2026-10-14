@@ -1,0 +1,73 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tpmd-proto",
+    "crates/tpmd-backend",
+    "crates/tpmd-backend-dummy",
+    "crates/tpmd-ipc",
+    "crates/tpmd",
+    "crates/tpmd-client",
+    "crates/tpmd-demo",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+authors = ["Offworld Nexus Authors"]
+license = "Apache-2.0"
+repository = "https://github.com/OffworldNexus/tpmd"
+
+[workspace.dependencies]
+# Internal crates. `version` accompanies each `path` so the crates could be
+# published later without editing every manifest.
+tpmd-proto = { path = "crates/tpmd-proto", version = "0.1.0" }
+tpmd-backend = { path = "crates/tpmd-backend", version = "0.1.0" }
+tpmd-backend-dummy = { path = "crates/tpmd-backend-dummy", version = "0.1.0" }
+tpmd-ipc = { path = "crates/tpmd-ipc", version = "0.1.0" }
+tpmd-client = { path = "crates/tpmd-client", version = "0.1.0" }
+
+clap = { version = "4.5", features = ["derive", "env"] }
+serde = { version = "1.0", features = ["derive"] }
+# serde has no Serialize/Deserialize impl for arrays longer than 32 bytes;
+# the key id (33) and signature (64) need this shim, exactly as weaver-mux does.
+serde-big-array = "0.5"
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+thiserror = "2.0"
+# Same RustCrypto line as weaver-mux, so signatures produced here verify with
+# weaver_mux::auth::verify byte-for-byte.
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "alloc"] }
+getrandom = "0.3"
+tokio = { version = "1.43", features = [
+    "sync",
+    "rt",
+    "fs",
+    "macros",
+    "net",
+    "time",
+    "signal",
+    "rt-multi-thread",
+    "io-util",
+] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+hex = "0.4"
+tempfile = "3"
+proptest = { version = "1.11", default-features = false, features = ["std"] }
+# Unix peer-credential retrieval (SO_PEERCRED / LOCAL_PEERCRED) and file modes.
+libc = "0.2"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true

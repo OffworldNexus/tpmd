@@ -1,0 +1,21 @@
+[package]
+name = "tpmd-ipc"
+description = "Cross-platform local endpoints, native caller authentication, secure filesystem helpers and framed I/O for tpmd."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tpmd-proto.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+postcard.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "tpmd-backend-dummy"
+description = "SQLite software P-256 key store (security level `file`) for the tpmd local key agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tpmd-proto.workspace = true
+tpmd-backend.workspace = true
+tpmd-ipc.workspace = true
+rusqlite.workspace = true
+p256.workspace = true
+getrandom.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

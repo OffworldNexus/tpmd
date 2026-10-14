@@ -1,0 +1,31 @@
+[package]
+name = "tpmd"
+description = "The tpmd local key agent daemon."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "tpmd"
+path = "src/main.rs"
+
+[dependencies]
+tpmd-proto.workspace = true
+tpmd-backend.workspace = true
+tpmd-backend-dummy.workspace = true
+tpmd-ipc.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tpmd-client.workspace = true
+tpmd-ipc.workspace = true
+tpmd-proto.workspace = true
+p256.workspace = true

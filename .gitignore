@@ -1,0 +1,14 @@
+# Local-only OpenCode skill directory: machine-specific test environments and
+# secrets. Never commit (also listed in .git/info/exclude).
+.opencode/
+
+# Rust build artefacts.
+/target
+**/*.rs.bk
+
+# Local runtime state produced when running the agent/demo by hand.
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sock

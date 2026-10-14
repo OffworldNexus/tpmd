@@ -1,0 +1,23 @@
+[package]
+name = "tpmd-demo"
+description = "A toy consumer that walks the Tunnel Weaver key life-cycle against tpmd."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "tpmd-demo"
+path = "src/main.rs"
+
+[dependencies]
+tpmd-proto.workspace = true
+tpmd-client.workspace = true
+tpmd-ipc.workspace = true
+clap.workspace = true
+tokio.workspace = true
+p256.workspace = true
+hex.workspace = true
+tempfile.workspace = true
