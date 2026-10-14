@@ -24,6 +24,19 @@ records them.
 | Backend selection | Runtime registry + `can_be_used()` + strongest `default_level()`, `--backend` to force | Backends are compiled in per OS but must prove they work here; the dummy is the guaranteed fallback. |
 | System mode | `--system` (or root) → `/run/tpmd.sock` mode `0666`, `/var/lib/tpmd` | Reachability is not authorization; clients need no `tss` membership. Deployment, not the daemon, provisions the directory. |
 
+## WVR-144 decisions
+
+| Decision | Value | Rationale |
+| --- | --- | --- |
+| Backend name / levels | `windows-cng`; advertises **`hardware` only** | The only honest hardware claim on Windows is a non-exportable, TPM-backed Platform Crypto Provider key. A DPAPI-wrapped software key is *not* sealing, so there is no `sealed` rung to report; keyring/file arrive from WVR-151 and the dummy. |
+| Custody check | Export policy must be `0` **and** `PCP_PLATFORM_TYPE` must report TPM 2.0 | "DPAPI alone is not proof of TPM-backed sealing": the level is read back from the provider, never inferred from its name. A key that fails either check is **destroyed** and the provision returns `backend_unavailable`. |
+| Usability proof | A live probe key at every daemon start (create → sign → export public → delete), cached | The ticket requires ordinary-user key creation to be *verified*: opening the provider succeeds over a network logon while key creation is refused, so a provider-only check would select an unusable backend. |
+| Key context | The owning user's **interactive** session; machine keys are not used | Matches the acceptance ("owning user's context", "no elevation") and the macOS LaunchAgent precedent. Per-user keys live in the user's CNG store; `LocalSystem` cannot use them. |
+| Agent shape | Silent per-user process, no window, started at logon (mechanism owned by WVR-149) | A service as `LocalSystem` cannot use a user's keys; a systray icon is optional UX and belongs to packaging. |
+| Observability | `tpmd status` (client-side, all platforms) | A silent process still has to be answerable: this is the first-class "is it running, and what can it do?" check, alongside Task Manager, the per-user pipe and the state directory. |
+| `unsafe` | Scoped exemption for one `ffi` module, using `windows-sys` (`Win32_Security_Cryptography`) | CNG is an OS component (nothing bundled); confining all FFI to one module keeps the rest of the crate safe code, mirroring `tpmd-ipc`'s `winutil`. |
+| Rig toolchain | rustup + **MSVC** via VS Build Tools on the Windows 11 VM | Matches what CI and shipping builds use (`x86_64-pc-windows-msvc`). |
+
 ## Dependency line
 
 `tpmd` deliberately shares the Tunnel Weaver cryptographic line so signatures

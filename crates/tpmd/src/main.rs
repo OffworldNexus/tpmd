@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use tpmd::Config;
+use tpmd_client::KeyRequest;
 use tpmd_ipc::{Endpoint, SocketAccess};
 use tpmd_proto::SecurityLevel;
 use tracing_subscriber::EnvFilter;
@@ -26,6 +27,23 @@ struct Cli {
 enum Command {
     /// Run the agent.
     Serve(ServeArgs),
+    /// Ask a running agent whether it is reachable, and what it can do.
+    ///
+    /// A silent background agent still has to be observable; this is the
+    /// first-class answer to "is it running?", on every platform.
+    Status(StatusArgs),
+}
+
+#[derive(Args)]
+struct StatusArgs {
+    /// Endpoint to reach. Defaults to the per-user endpoint, then the system
+    /// endpoint (Unix only for an explicit path).
+    #[arg(long)]
+    socket: Option<PathBuf>,
+    /// Namespace to ask as. Keys are scoped by namespace, so this only changes
+    /// which namespace the agent reports.
+    #[arg(long, default_value = "tpmd-status")]
+    namespace: String,
 }
 
 #[derive(Args)]
@@ -69,7 +87,73 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Serve(args) => serve(args),
+        Command::Status(args) => status(args),
     }
+}
+
+/// Report whether an agent answers, and what it says about itself.
+///
+/// This deliberately goes through the published client library rather than a
+/// private path: the answer a user gets here is the same contract an
+/// application gets, so "it works" means the client works too.
+fn status(args: StatusArgs) -> ExitCode {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("tpmd: cannot start the async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let namespace = args.namespace;
+    let socket = args.socket;
+    runtime.block_on(async move {
+        let client = match socket {
+            Some(path) => {
+                let endpoint = tpmd_ipc::Endpoint::unix_socket(path);
+                tpmd_client::Client::connect(&endpoint, &namespace, KeyRequest::None).await
+            }
+            // No explicit endpoint: try the per-user one, then the system one.
+            None => tpmd_client::Client::connect_candidates(&namespace, KeyRequest::None).await,
+        };
+
+        let mut client = match client {
+            Ok(client) => client,
+            Err(error) => {
+                eprintln!("agent     : unreachable ({error})");
+                return ExitCode::FAILURE;
+            }
+        };
+
+        let status = match client.status().await {
+            Ok(status) => status,
+            Err(error) => {
+                eprintln!("agent     : reachable, but status failed ({error})");
+                return ExitCode::FAILURE;
+            }
+        };
+
+        let levels = status
+            .levels
+            .iter()
+            .map(|level| level.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("agent         : listening");
+        println!("daemon        : {}", status.daemon);
+        println!("backend       : {}", status.backend);
+        println!("principal     : {}", status.principal);
+        println!("namespace     : {}", status.namespace);
+        println!(
+            "levels        : [{levels}] (achieved {})",
+            status.default_level
+        );
+        println!("default floor : {}", status.default_min_security);
+        ExitCode::SUCCESS
+    })
 }
 
 fn serve(args: ServeArgs) -> ExitCode {

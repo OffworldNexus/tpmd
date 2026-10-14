@@ -25,6 +25,7 @@ keyring backends arrive in later tickets behind the same interface.
 | `tpmd-store` | SeaORM entities and migrations for the one SQLite file every backend shares. |
 | `tpmd-backend-dummy` | SQLite software P-256 store (level `file`). |
 | `tpmd-backend-linux-tpm` | Linux TPM 2.0 store (levels `sealed` and `hardware`), hand-rolled transport, no libtss2. |
+| `tpmd-backend-windows-cng` | Windows CNG Platform Crypto Provider store (level `hardware`), all FFI in one module. |
 | `tpmd-ipc` | Cross-platform local endpoint: Unix socket, macOS socket, Windows named pipe, with native caller authentication. |
 | `tpmd` | The daemon: serve loop, caller authentication, namespace and floor enforcement, backend registry and selection, CLI. |
 | `tpmd-client` | The consumer API, hiding the transport. |

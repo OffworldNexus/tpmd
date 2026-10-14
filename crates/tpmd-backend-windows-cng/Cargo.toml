@@ -1,0 +1,30 @@
+[package]
+name = "tpmd-backend-windows-cng"
+description = "Windows CNG Platform Crypto Provider backend (security level `hardware`) for the tpmd local key agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tpmd-proto.workspace = true
+tpmd-backend.workspace = true
+tpmd-store.workspace = true
+async-trait.workspace = true
+sea-orm.workspace = true
+p256.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# CNG (NCrypt*) is a Windows OS component; nothing is bundled.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true
+hex.workspace = true

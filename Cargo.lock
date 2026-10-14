@@ -2832,6 +2832,7 @@ dependencies = [
  "tpmd-backend",
  "tpmd-backend-dummy",
  "tpmd-backend-linux-tpm",
+ "tpmd-backend-windows-cng",
  "tpmd-client",
  "tpmd-ipc",
  "tpmd-proto",
@@ -2885,6 +2886,26 @@ dependencies = [
  "tpmd-store",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "tpmd-backend-windows-cng"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "getrandom 0.3.4",
+ "hex",
+ "p256",
+ "sea-orm",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tpmd-backend",
+ "tpmd-proto",
+ "tpmd-store",
+ "tracing",
+ "windows-sys",
 ]
 
 [[package]]
