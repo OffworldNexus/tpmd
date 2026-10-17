@@ -136,11 +136,11 @@ skip them where touching the login keyring would prompt.
 - Verify an install for real (needs docker and network; installs from the
   *published* repository in a clean container per release): `packaging/deb/verify-install.sh`.
 - **No distribution can build this package.** The workspace declares
-  `rust-version = "1.98"` and edition 2024, and every currently supported release
-  ships an older `rustc` — measured: 1.90 builds the workspace, 1.85 does not
-  (it fails inside `ctutils`). `debian/` therefore follows the Debian Rust Team's
-  policy in *shape* while the binaries come from our own pinned toolchain;
-  `docs/install.md` states the deviation and its consequences.
+  `rust-version = "1.94"` and edition 2024, and every currently supported release
+  ships an older `rustc` — measured: 1.94 builds and passes the suite, 1.93 is
+  refused (`sea-orm` and `sqlx` require 1.94). `debian/` therefore follows the
+  Debian Rust Team's policy in *shape* while the binaries come from our own
+  pinned toolchain; `docs/install.md` states the deviation and its consequences.
 - macOS is packaged separately (`packaging/macos`, driven by fastlane). Like the
   Debian pipeline, neither runs on the push or pull-request path.
 

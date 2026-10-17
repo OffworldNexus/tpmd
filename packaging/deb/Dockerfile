@@ -17,7 +17,7 @@ FROM ${BASE}
 
 # Declared again below FROM: an ARG before FROM is only in scope for the FROM
 # instruction itself, so without this the toolchain would arrive empty here.
-ARG RUST_VERSION=1.98.0
+ARG RUST_VERSION=1.94.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 

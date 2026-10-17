@@ -197,12 +197,13 @@ during the build, against the distribution's own `rustc`, with dependencies
 taken from packaged crate sources. That is not possible here, and it is worth
 being plain about why:
 
-* `Cargo.toml` declares `rust-version = "1.98"` and uses edition 2024. Edition
-  2024 alone needs rustc 1.85, and the declared minimum is far above it.
-* Every currently supported release ships an older compiler than the *real*
-  floor: Debian 12 has 1.63, Ubuntu 22.04 has 1.66, Ubuntu 24.04 has 1.75, and
-  Debian 13 and Ubuntu 26.04 have 1.85 — which builds neither this workspace nor
-  the RustCrypto stack it depends on.
+* `Cargo.toml` declares `rust-version = "1.94"` and uses edition 2024. Edition
+  2024 alone needs rustc 1.85; 1.94 is the true floor, and it belongs to the
+  store's dependencies (`sea-orm`, `sqlx`) rather than to our own code.
+* Every currently supported release ships an older compiler than that floor:
+  Debian 12 has 1.63, Ubuntu 22.04 has 1.66, Ubuntu 24.04 has 1.75, and Debian 13
+  and Ubuntu 26.04 have 1.85 — which builds neither this workspace nor the
+  RustCrypto stack it depends on.
 * So a build-dependency on the toolchain could not be satisfied on any target,
   and the binaries are built in a pinned container instead
   (`packaging/deb/Dockerfile`), against a pinned toolchain.

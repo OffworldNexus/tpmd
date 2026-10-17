@@ -49,9 +49,30 @@ images=${*:-"debian:12 debian:13 debian:sid ubuntu:22.04 ubuntu:24.04 ubuntu:26.
 
 failures=0
 
+# The container tag is not the apt codename: `debian:13` is trixie and
+# `ubuntu:22.04` is jammy. Deriving one from the other makes the repository setup
+# fail on every release for a reason that looks nothing like the cause, so the
+# mapping is explicit.
+codename_of() {
+	case "$1" in
+	debian:12) echo bookworm ;;
+	debian:13) echo trixie ;;
+	debian:sid) echo sid ;;
+	ubuntu:22.04) echo jammy ;;
+	ubuntu:24.04) echo noble ;;
+	ubuntu:26.04) echo resolute ;;
+	*) echo unknown ;;
+	esac
+}
+
 for image in $images; do
 	distro=${image%%:*}
-	codename=${image#*:}
+	codename=$(codename_of "$image")
+	if [ "$codename" = unknown ]; then
+		printf 'unknown release: %s\n' "$image" >&2
+		failures=$((failures + 1))
+		continue
+	fi
 	printf '\n== %s (%s/%s)\n' "$image" "$distro" "$codename"
 
 	if docker run --rm $mount --env TPMD_DEB_NAME="${deb##*/}" "$image" sh -eu -c '
