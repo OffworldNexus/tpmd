@@ -19,9 +19,15 @@ tpmd-backend.workspace = true
 # has chosen a backend — so it depends on the store itself, not only on backends.
 tpmd-store.workspace = true
 sea-orm.workspace = true
+# The dummy is always built in: it is the guaranteed floor of the ladder, and
+# moving it into a package of its own would save nothing while making the floor
+# optional. Everything above it is either a built-in (the default) or a plugin
+# (the packaging split); see the `[features]` table below.
 tpmd-backend-dummy.workspace = true
-# The keyring backend serves all three platforms, so it is built everywhere.
-tpmd-backend-keyring.workspace = true
+# The keyring backend serves all three platforms, so it is built everywhere —
+# but only as a built-in. It is optional so the split can leave it out and load
+# it as a plugin instead.
+tpmd-backend-keyring = { workspace = true, optional = true }
 tpmd-ipc.workspace = true
 # The daemon ships its own diagnostic client so that "is it running, and what
 # can it do?" has a first-class answer (and so the published client library is
@@ -38,22 +44,50 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
+# The run-time plugin boundary, for the packaging split only. Optional: a
+# default build has no loader and no `dlopen` in it at all.
+tpmd-plugin = { workspace = true, optional = true }
+
+# How the daemon comes by a backend other than the dummy. Exactly one of these
+# is on, and the default is the monolith every existing build and test has
+# always produced.
+[features]
+default = ["builtin-backends"]
+# Every backend is linked into the daemon. What is built is gated by the target,
+# so a Windows build never contains the Linux TPM code.
+builtin-backends = [
+    "dep:tpmd-backend-keyring",
+    "dep:tpmd-backend-linux-tpm",
+    "dep:tpmd-backend-windows-cng",
+    "dep:tpmd-backend-macos-se",
+]
+# Backends are loaded at run time from `/usr/lib/tpmd/backends` (or
+# `TPMD_BACKEND_DIR`), each shipped by its own package. Turned on by nothing but
+# the Debian split (see `debian/rules`), and Linux-only: the Windows and macOS
+# backends stay linked in until their installers grow the same treatment.
+loadable-backends = ["dep:tpmd-plugin", "tpmd-plugin/host"]
 
 # The Linux TPM backend is compiled in only on Linux, so a Windows or macOS
 # build never links its code.
 [target.'cfg(target_os = "linux")'.dependencies]
-tpmd-backend-linux-tpm.workspace = true
+tpmd-backend-linux-tpm = { workspace = true, optional = true }
 
 # Likewise the Windows CNG backend exists only on Windows.
 [target.'cfg(target_os = "windows")'.dependencies]
-tpmd-backend-windows-cng.workspace = true
+tpmd-backend-windows-cng = { workspace = true, optional = true }
 
 # And the Secure Enclave backend only on macOS.
 [target.'cfg(target_os = "macos")'.dependencies]
-tpmd-backend-macos-se.workspace = true
+tpmd-backend-macos-se = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
 tpmd-ipc.workspace = true
 tpmd-proto.workspace = true
 p256.workspace = true
+# The loader is tested directly, even though the daemon only compiles it in
+# under `loadable-backends`: a test build may have the feature without the
+# shipped binary having it, so the loader's coverage does not depend on which
+# build mode CI happens to run.
+tpmd-plugin = { workspace = true, features = ["host"] }
+tpmd-backend.workspace = true

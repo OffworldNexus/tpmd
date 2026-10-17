@@ -1,0 +1,22 @@
+[package]
+name = "tpmd-plugin-fixture"
+description = "Test-only plugin that exercises the tpmd plugin loader against a real cdylib."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+# Exists to be built into a shared object by one test; nothing links it.
+publish = false
+
+[dependencies]
+tpmd-plugin.workspace = true
+tpmd-backend.workspace = true
+tpmd-proto.workspace = true
+async-trait.workspace = true
+
+[features]
+# Answer with a plugin ABI number this daemon cannot speak, so the loader's
+# refusal is exercised against a real shared object rather than a mock.
+wrong-abi = []

@@ -7,7 +7,7 @@ use p256::ecdsa::signature::Signer as _;
 use p256::elliptic_curve::sec1::ToSec1Point as _;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use sha2::{Digest as _, Sha256};
-use tpmd_backend::{Backend, BackendError, Owner};
+use tpmd_backend::{Backend, BackendError, BackendFactory, Owner};
 use tpmd_proto::{Algorithm, KeyId, KeyInfo, SecurityLevel, Signature};
 use tpmd_store::entities::tpm_keys;
 use tpmd_store::map_db_error;
@@ -30,6 +30,24 @@ const LEVELS: &[SecurityLevel] = &[SecurityLevel::Sealed, SecurityLevel::Hardwar
 
 /// The only algorithm this backend offers.
 const ALGORITHMS: &[Algorithm] = &[Algorithm::EcdsaP256Sha256];
+
+/// How the daemon constructs this backend.
+///
+/// Beside the backend rather than in the daemon, so that the same factory
+/// serves a build that links this crate and one that loads it as a plugin —
+/// and so that the name `linux-tpm` is written down once.
+pub struct LinuxTpmFactory;
+
+#[async_trait]
+impl BackendFactory for LinuxTpmFactory {
+    fn name(&self) -> &'static str {
+        "linux-tpm"
+    }
+
+    async fn open(&self, state_dir: &Path) -> Result<Box<dyn Backend>, BackendError> {
+        Ok(Box::new(LinuxTpmBackend::open(state_dir).await?))
+    }
+}
 
 /// A TPM 2.0 backend: `hardware` and `sealed` P-256 keys.
 ///

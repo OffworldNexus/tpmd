@@ -16,6 +16,14 @@
 # The committed changelog is left exactly as it was found: a generated entry is
 # prepended for the build and removed again on exit.
 
+# The split build mode, turned on here and nowhere else: the daemon is built
+# with `loadable-backends` (so it loads its backends from /usr/lib/tpmd/backends
+# rather than linking them in) and one shared object is built per backend
+# package. A plain `cargo build` asks for neither, which is what keeps the normal
+# build the monolith it has always been. See debian/rules.
+TPMD_DEB_SPLIT=1
+export TPMD_DEB_SPLIT
+
 set -eu
 
 out=${1:-dist}

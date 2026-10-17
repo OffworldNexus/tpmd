@@ -1,0 +1,15 @@
+[package]
+name = "tpmd-backend-linux-tpm-plugin"
+description = "Loadable-plugin shim for the tpmd Linux TPM backend (packaging split)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+# A shared-object shim for one packaging build, not a library anything links.
+publish = false
+
+[dependencies]
+tpmd-plugin.workspace = true
+tpmd-backend-linux-tpm.workspace = true

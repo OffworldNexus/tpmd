@@ -1,13 +1,29 @@
 #!/usr/bin/make -f
 #
 # The Rust toolchain is supplied by the build environment rather than by a
-# build-dependency: tpmd declares rust-version = "1.98" and uses edition 2024,
+# build-dependency: tpmd declares rust-version = "1.94" and uses edition 2024,
 # which is newer than the rustc in every currently supported Debian-like
 # release, so dh-cargo's packaged-sources build cannot be used for this package.
 # The Debian Rust Team's policy is nevertheless followed in shape — this file,
 # the control fields, the DEP-5 copyright, the debhelper systemd integration,
 # the /etc/default file and the man pages are what that policy asks for — and
 # docs/install.md records the deviation and its consequences.
+#
+# There are two build modes, and the difference between them is *where a backend
+# comes from*:
+#
+#   * the default (`TPMD_DEB_SPLIT=0`) links every backend into the daemon, which
+#     is what a plain `cargo build` produces and what a single-package .deb has
+#     always shipped;
+#   * the split (`TPMD_DEB_SPLIT=1`) builds the daemon with `loadable-backends`
+#     — the dummy and nothing else — and one `cdylib` per backend to ship in its
+#     own package.
+#
+# Nothing but packaging/deb/build-deb.sh turns the split on, which is the point:
+# a normal `cargo build` or `cargo test --workspace` never asks for the feature
+# and never produces a shared object. The backend packages are declared in
+# debian/control for the split, so the default mode excludes them from the
+# debhelper sequence rather than shipping them empty.
 
 # The policy requires $CARGO_HOME to live inside the package build directory, so
 # that a build never writes to the building user's home.
@@ -19,17 +35,37 @@ export CARGO_HOME := $(CURDIR)/debian/cargo-home
 # ship the stripped binary and produce none. Set
 # CARGO_PROFILE_RELEASE_STRIP=none here if that ever changes.
 
+TPMD_DEB_SPLIT ?= 0
+
+ifeq ($(TPMD_DEB_SPLIT),1)
+# The daemon that ships in the split set: the built-in floor only, everything
+# above it loaded from the plugin directory.
+CARGO_FEATURES := --no-default-features --features loadable-backends
+BACKEND_PACKAGES :=
+else
+CARGO_FEATURES :=
+# Declared for the split, empty without it: keep them out of the sequence
+# entirely rather than build two .debs with nothing in them.
+BACKEND_PACKAGES := -Ntpmd-backend-keyring -Ntpmd-backend-linux-tpm
+endif
+
 %:
-	dh $@
+	dh $@ $(BACKEND_PACKAGES)
 
 # There is no build system to detect and nothing to probe that cargo does not
 # probe itself.
 override_dh_auto_configure:
 
 override_dh_auto_build:
-	# Only the agent is built: the toy consumer is a development tool and is
-	deliberately not distributed.
-	cargo build --release --locked --verbose --bin tpmd
+	cargo build --release --locked --verbose $(CARGO_FEATURES) -p tpmd
+ifeq ($(TPMD_DEB_SPLIT),1)
+# One shared object per backend package. `cargo rustc --crate-type cdylib` is how
+# a shim crate — which is an ordinary library in every other build — is asked for
+# that one artefact, without a crate-type in its manifest that would make the
+# normal `cargo build --workspace` produce shared objects too.
+	cargo rustc --release --locked --verbose -p tpmd-backend-keyring-plugin --crate-type cdylib
+	cargo rustc --release --locked --verbose -p tpmd-backend-linux-tpm-plugin --crate-type cdylib
+endif
 
 # The suite needs a session bus and a credential store, which a package build
 # has no business providing. It runs in CI instead, on every change; see
@@ -45,3 +81,9 @@ override_dh_auto_install:
 	install -D -m 0644 debian/tpmd.default $(CURDIR)/debian/tpmd/etc/default/tpmd
 	install -D -m 0644 debian/tpmd-udev.rules $(CURDIR)/debian/tpmd/usr/lib/udev/rules.d/60-tpmd.rules
 	install -D -m 0644 debian/sysusers.d/tpmd.conf $(CURDIR)/debian/tpmd/usr/lib/sysusers.d/tpmd.conf
+ifeq ($(TPMD_DEB_SPLIT),1)
+	install -D -m 0644 target/release/libtpmd_backend_keyring_plugin.so \
+	  $(CURDIR)/debian/tpmd-backend-keyring/usr/lib/tpmd/backends/libtpmd_backend_keyring_plugin.so
+	install -D -m 0644 target/release/libtpmd_backend_linux_tpm_plugin.so \
+	  $(CURDIR)/debian/tpmd-backend-linux-tpm/usr/lib/tpmd/backends/libtpmd_backend_linux_tpm_plugin.so
+endif

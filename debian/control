@@ -9,7 +9,7 @@ Rules-Requires-Root: no
 Vcs-Git: https://github.com/OffworldNexus/tpmd.git
 Vcs-Browser: https://github.com/OffworldNexus/tpmd
 # No rustc/cargo build-dependency is declared on purpose. tpmd declares
-# rust-version = "1.98" and uses edition 2024, which is newer than the rustc in
+# rust-version = "1.94" and uses edition 2024, which is newer than the rustc in
 # every currently supported Debian-like release, so the build dependency could
 # not be satisfied anywhere. The toolchain is supplied by the build environment
 # instead; see debian/rules and docs/install.md for what that means and what
@@ -18,6 +18,12 @@ Vcs-Browser: https://github.com/OffworldNexus/tpmd
 Package: tpmd
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}
+# The backends above the guaranteed floor are separate packages, and a plain
+# install is meant to have the whole ladder. Recommends, rather than Depends,
+# because the daemon works without any of them — it falls back to `file` — and
+# because the minimal install is a configuration someone may deliberately want:
+# `apt-get install --no-install-recommends tpmd` gives exactly that.
+Recommends: tpmd-backend-keyring, tpmd-backend-linux-tpm
 Description: local key agent that signs on behalf of local applications
  tpmd owns private signing keys and signs on behalf of local applications over
  a local socket, so that a consumer never sees key material: it asks for a
@@ -33,3 +39,44 @@ Description: local key agent that signs on behalf of local applications
  serves every local user and authorises each caller from kernel peer
  credentials. A per-user agent can also be run by hand; the toy consumer used
  for end-to-end checks is built from the source tree rather than shipped.
+ .
+ The backends above the guaranteed `file` level are installed separately, one
+ package each (recommended above), and are loaded by the daemon from
+ /usr/lib/tpmd/backends at run time. The `file` backend is built in and is the
+ floor: a machine with nothing else installed still serves, at the level that
+ promises least.
+
+Package: tpmd-backend-keyring
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: operating system credential store backend for tpmd
+ tpmd owns private signing keys and signs on behalf of local applications.
+ .
+ This package provides the `keyring` rung of tpmd's security ladder: the key
+ scalar is kept in the operating system's own credential store (the Secret
+ Service over the session bus on Linux), so a copy of it needs the user's
+ password rather than merely the file's permissions. Signing still happens in
+ the daemon; only the custody of the scalar is stronger than the built-in
+ `file` level.
+ .
+ The backend is a plugin, loaded by tpmd from /usr/lib/tpmd/backends. It owns
+ nothing but that file and works whatever the daemon's version, so installing
+ or removing it never disturbs the agent's own files, and a host with no
+ session bus simply does not offer this rung.
+
+Package: tpmd-backend-linux-tpm
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Linux TPM 2.0 backend for tpmd
+ tpmd owns private signing keys and signs on behalf of local applications.
+ .
+ This package provides the `sealed` and `hardware` rungs of tpmd's security
+ ladder, through a TPM 2.0 device: at `sealed` the key scalar is wrapped by the
+ TPM and inert anywhere else, and at `hardware` the key never leaves the TPM at
+ all, not even to sign.
+ .
+ The backend is a plugin, loaded by tpmd from /usr/lib/tpmd/backends. It owns
+ nothing but that file and works whatever the daemon's version, so installing
+ or removing it never disturbs the agent's own files, and a machine whose TPM
+ cannot be opened simply does not offer these rungs. Access to the device is
+ granted by the daemon's package (the tss user and the udev rule), not here.

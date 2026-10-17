@@ -220,11 +220,12 @@ async fn set_selection(
     // Refuse a name this build does not have: the daemon would refuse to start
     // afterwards, and better to say so now than to leave a machine that will not
     // boot its agent.
-    let factories = tpmd::registry::builtin_factories();
+    let backends = tpmd::registry::backends();
+    let factories = backends.factories();
     if !factories.iter().any(|factory| factory.name() == name) {
         eprintln!(
             "tpmd: {name} is not a backend this build has (built: {})",
-            tpmd::registry::built_names(&factories)
+            tpmd::registry::built_names(factories)
         );
         return ExitCode::FAILURE;
     }

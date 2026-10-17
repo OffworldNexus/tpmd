@@ -14,6 +14,16 @@
 //! can never come up empty — it is the floor of the ladder. The keyring backend
 //! is also always built, but may not be usable, in which case selection passes
 //! over it for the dummy.
+//!
+//! # Where a factory comes from
+//!
+//! The Debian split (`loadable-backends`) moves *one* thing: the keyring and
+//! Linux TPM factories stop being compiled in and are instead asked of a shared
+//! object in `/usr/lib/tpmd/backends`. Nothing downstream changes — the survey,
+//! the ladder, the sticky record and the floor logic all see an ordinary
+//! `Box<dyn BackendFactory>` either way, and a plugin that is absent is simply a
+//! shorter ladder. The dummy never moves: it is the guaranteed rung, and a floor
+//! that could be uninstalled is not a floor.
 
 use std::cmp::Reverse;
 use std::path::Path;
@@ -21,41 +31,111 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tpmd_backend::{Backend, BackendError};
+#[cfg(feature = "loadable-backends")]
+use tracing::error;
 
-/// A backend this binary knows how to construct.
-#[async_trait]
-pub trait BackendFactory: Send + Sync {
-    /// The backend's name, as used by `--backend`, `status` and logs.
-    fn name(&self) -> &'static str;
+/// A backend this build knows how to construct.
+///
+/// Re-exported from [`tpmd_backend`], which is where it has to live: the plugin
+/// boundary hands back one of these, and a backend crate implements it without
+/// knowing whether it is linked into the daemon or loaded beside it.
+pub use tpmd_backend::BackendFactory;
 
-    /// Construct the backend, opening its store if it has one.
-    ///
-    /// Failing here means "unavailable on this host": the registry records the
-    /// reason and moves on rather than aborting the daemon.
-    async fn open(&self, state_dir: &Path) -> Result<Box<dyn Backend>, BackendError>;
+#[cfg(all(feature = "builtin-backends", feature = "loadable-backends"))]
+compile_error!(
+    "`builtin-backends` and `loadable-backends` are mutually exclusive: one links every \
+     backend into the daemon, the other loads them from plugins, and both together would \
+     offer every rung twice — including the ones the survey is supposed to weigh"
+);
+
+#[cfg(not(any(feature = "builtin-backends", feature = "loadable-backends")))]
+compile_error!(
+    "one of `builtin-backends` (the default) or `loadable-backends` must be enabled: the \
+     daemon has to be told how it comes by a backend other than the dummy"
+);
+
+#[cfg(all(feature = "loadable-backends", not(target_os = "linux")))]
+compile_error!(
+    "`loadable-backends` is a Linux-only build mode: the Windows and macOS backends stay \
+     linked into their agent (and are not shipped by the Debian packages this mode exists \
+     for) until their installers grow the same split"
+);
+
+/// Every backend this build can offer, plus whatever must stay mapped for them.
+///
+/// Held for the daemon's whole run: under `loadable-backends` the factories (and
+/// the vtable of every backend opened through one) point into shared objects,
+/// and a plugin must not be unmapped while something may still call into it.
+#[must_use]
+pub struct Backends {
+    factories: Vec<Box<dyn BackendFactory>>,
+    /// Declared after the factories so it drops after them, which is the order
+    /// the mapping requires.
+    #[cfg(feature = "loadable-backends")]
+    _mapped: tpmd_plugin::host::Mapped,
 }
 
-/// Every backend compiled into this binary for this operating system.
-#[must_use]
-pub fn builtin_factories() -> Vec<Box<dyn BackendFactory>> {
-    // Two backends are unconditional: the dummy, because it is the guaranteed
-    // fallback, and the keyring, because it serves every platform (whether it
-    // can actually be used there is a run-time question, not a build-time one).
-    // The `mut` is only exercised where a hardware backend exists, i.e. not on
-    // macOS or any other platform without one.
+impl Backends {
+    /// The factories to survey, in ladder-agnostic order (the survey sorts).
+    #[must_use]
+    pub fn factories(&self) -> &[Box<dyn BackendFactory>] {
+        &self.factories
+    }
+}
+
+/// Every backend this build can offer.
+///
+/// What is *built* is this function's business; what is *used* is the survey's.
+#[cfg(feature = "builtin-backends")]
+pub fn backends() -> Backends {
+    // The dummy is unconditional, because it is the guaranteed fallback. The
+    // keyring serves every platform (whether it can actually be used there is a
+    // run-time question, not a build-time one). The `mut` is only exercised
+    // where a hardware backend exists, i.e. not on macOS or any other platform
+    // without one.
     #[cfg_attr(
         not(any(target_os = "linux", target_os = "windows", target_os = "macos")),
         allow(unused_mut)
     )]
-    let mut factories: Vec<Box<dyn BackendFactory>> =
-        vec![Box::new(DummyFactory), Box::new(KeyringFactory)];
+    let mut factories: Vec<Box<dyn BackendFactory>> = vec![
+        Box::new(DummyFactory),
+        Box::new(tpmd_backend_keyring::KeyringFactory),
+    ];
     #[cfg(target_os = "linux")]
-    factories.push(Box::new(LinuxTpmFactory));
+    factories.push(Box::new(tpmd_backend_linux_tpm::LinuxTpmFactory));
     #[cfg(target_os = "windows")]
     factories.push(Box::new(WindowsCngFactory));
     #[cfg(target_os = "macos")]
     factories.push(Box::new(SecureEnclaveFactory));
-    factories
+    Backends { factories }
+}
+
+/// Every backend this machine has *installed*: the dummy, plus one plugin per
+/// backend package.
+///
+/// A plugin that is present but cannot be loaded is an **error in the journal**,
+/// never a silent omission: an installed rung that quietly is not offered is how
+/// a machine ends up on a weaker store without anyone deciding that. It does not
+/// stop the daemon — a broken optional package must not brick the agent — but it
+/// does mean the ladder below it can be chosen, which is why it is said loudly
+/// rather than logged at a level nobody reads.
+#[cfg(feature = "loadable-backends")]
+pub fn backends() -> Backends {
+    let plugins = tpmd_plugin::host::load(&tpmd_plugin::host::directory());
+    for (path, reason) in plugins.failures() {
+        error!(
+            plugin = %path.display(),
+            %reason,
+            "an installed backend plugin was not loaded, so its rung is not offered"
+        );
+    }
+    let (loaded, mapped) = plugins.into_factories();
+    let mut factories: Vec<Box<dyn BackendFactory>> = vec![Box::new(DummyFactory)];
+    factories.extend(loaded);
+    Backends {
+        factories,
+        _mapped: mapped,
+    }
 }
 
 /// The names of every built backend, in selection order.
@@ -312,45 +392,6 @@ impl BackendFactory for DummyFactory {
     async fn open(&self, state_dir: &Path) -> Result<Box<dyn Backend>, BackendError> {
         Ok(Box::new(
             tpmd_backend_dummy::DummyBackend::open(state_dir).await?,
-        ))
-    }
-}
-
-/// The universal `keyring`-level backend: the operating system's own credential
-/// store.
-///
-/// Built everywhere, unlike the hardware backends, because all three platforms
-/// have such a store. Whether this host's store is reachable is a run-time
-/// question the backend answers through [`Backend::can_be_used`].
-struct KeyringFactory;
-
-#[async_trait]
-impl BackendFactory for KeyringFactory {
-    fn name(&self) -> &'static str {
-        "keyring"
-    }
-
-    async fn open(&self, state_dir: &Path) -> Result<Box<dyn Backend>, BackendError> {
-        Ok(Box::new(
-            tpmd_backend_keyring::KeyringBackend::open(state_dir).await?,
-        ))
-    }
-}
-
-/// The Linux TPM 2.0 backend: `sealed` and `hardware`.
-#[cfg(target_os = "linux")]
-struct LinuxTpmFactory;
-
-#[cfg(target_os = "linux")]
-#[async_trait]
-impl BackendFactory for LinuxTpmFactory {
-    fn name(&self) -> &'static str {
-        "linux-tpm"
-    }
-
-    async fn open(&self, state_dir: &Path) -> Result<Box<dyn Backend>, BackendError> {
-        Ok(Box::new(
-            tpmd_backend_linux_tpm::LinuxTpmBackend::open(state_dir).await?,
         ))
     }
 }
