@@ -335,10 +335,23 @@ than at the store being unreachable; `cmdkey` "working" was a red herring, since
 it writes session-persistable credentials. That is why creation now grades
 persistence (durable first, session as a logged fallback) instead of pinning one.
 
-**Still owed:** a *locked* keychain / locked collection run on macOS and Linux
-(the classification of "locked" versus "absent" is unit-tested and mapped, but
-only an unlocked store was available on either machine), and a Windows run from
-a service- or logon-started agent rather than a scheduled task.
+**Measured beyond the happy path, on macOS.** With the store pointed at an
+isolated *unlocked* keychain (the user-domain default, which is what the store
+resolves) all five store-gated tests pass in 0.1 s. With that same keychain
+*locked*, a write fails in about a second with an authorization error, which the
+backend reports as `store_locked`: it does not wait for an unlock, because the
+keychain prompt belongs to the login keychain and to item ACLs rather than to the
+`SecItem*` calls this backend makes. And the same suite run over SSH fails three
+of its five tests with `User interaction is not allowed` while the two that never
+write pass — which is what makes the Aqua result evidence rather than inference:
+the login keychain is simply unreachable from launchd's Background domain.
+GitHub's `macos-latest` runner has a usable store too, and runs the same five
+tests under `TPMD_TEST_KEYRING=require` instead of skipping them.
+
+**Still owed:** the *login* keychain left locked (the measurement above locked an
+isolated keychain instead, because restoring the login one needs its password),
+the equivalent locked-collection run on Linux, and a Windows run from a service-
+or logon-started agent rather than a scheduled task.
 
 ## Out of scope
 
