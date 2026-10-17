@@ -7,5 +7,6 @@
 //! part of the primary key so a foreign lookup is indistinguishable from a
 //! missing key.
 
+pub mod cng_keys;
 pub mod keys;
 pub mod tpm_keys;

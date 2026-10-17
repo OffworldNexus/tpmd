@@ -6,6 +6,7 @@ members = [
     "crates/tpmd-store",
     "crates/tpmd-backend-dummy",
     "crates/tpmd-backend-linux-tpm",
+    "crates/tpmd-backend-windows-cng",
     "crates/tpmd-ipc",
     "crates/tpmd",
     "crates/tpmd-client",
@@ -28,6 +29,7 @@ tpmd-backend = { path = "crates/tpmd-backend", version = "0.1.0" }
 tpmd-store = { path = "crates/tpmd-store", version = "0.1.0" }
 tpmd-backend-dummy = { path = "crates/tpmd-backend-dummy", version = "0.1.0" }
 tpmd-backend-linux-tpm = { path = "crates/tpmd-backend-linux-tpm", version = "0.1.0" }
+tpmd-backend-windows-cng = { path = "crates/tpmd-backend-windows-cng", version = "0.1.0" }
 tpmd-ipc = { path = "crates/tpmd-ipc", version = "0.1.0" }
 tpmd-client = { path = "crates/tpmd-client", version = "0.1.0" }
 
@@ -79,10 +81,13 @@ tempfile = "3"
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 # Unix peer-credential retrieval (SO_PEERCRED / LOCAL_PEERCRED) and file modes.
 libc = "0.2"
+# Windows platform APIs. `Win32_Security_Cryptography` is CNG (NCrypt*), used by
+# `tpmd-backend-windows-cng` for the Platform Crypto Provider.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
     "Win32_System_Threading",

@@ -37,11 +37,16 @@ pub trait BackendFactory: Send + Sync {
 #[must_use]
 pub fn builtin_factories() -> Vec<Box<dyn BackendFactory>> {
     // The dummy is unconditional: it is the guaranteed fallback. The `mut` is
-    // only needed where another backend exists, i.e. on Linux.
-    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    // only needed where another backend exists, i.e. not on macOS.
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "windows")),
+        allow(unused_mut)
+    )]
     let mut factories: Vec<Box<dyn BackendFactory>> = vec![Box::new(DummyFactory)];
     #[cfg(target_os = "linux")]
     factories.push(Box::new(LinuxTpmFactory));
+    #[cfg(target_os = "windows")]
+    factories.push(Box::new(WindowsCngFactory));
     factories
 }
 
@@ -192,6 +197,24 @@ impl BackendFactory for LinuxTpmFactory {
     async fn open(&self, state_dir: &Path) -> Result<Box<dyn Backend>, BackendError> {
         Ok(Box::new(
             tpmd_backend_linux_tpm::LinuxTpmBackend::open(state_dir).await?,
+        ))
+    }
+}
+
+/// The Windows CNG backend: `hardware`, via the Platform Crypto Provider.
+#[cfg(target_os = "windows")]
+struct WindowsCngFactory;
+
+#[cfg(target_os = "windows")]
+#[async_trait]
+impl BackendFactory for WindowsCngFactory {
+    fn name(&self) -> &'static str {
+        "windows-cng"
+    }
+
+    async fn open(&self, state_dir: &Path) -> Result<Box<dyn Backend>, BackendError> {
+        Ok(Box::new(
+            tpmd_backend_windows_cng::WindowsCngBackend::open(state_dir).await?,
         ))
     }
 }

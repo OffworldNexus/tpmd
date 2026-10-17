@@ -18,6 +18,7 @@ the life-cycle with a simulated relay.
 | `tpmd-store` | SeaORM entities + migrations for the **one shared SQLite file** | `sea-orm`, `sea-orm-migration` |
 | `tpmd-backend-dummy` | SQLite software P-256 store (level `file`) | `tpmd-store`, `p256` |
 | `tpmd-backend-linux-tpm` | Linux TPM 2.0 store (levels `sealed`, `hardware`) | hand-rolled TPM2 over `/dev/tpmrm*`, `tpmd-store`, `p256`, `zeroize` |
+| `tpmd-backend-windows-cng` | Windows CNG Platform Crypto Provider store (level `hardware`) | `windows-sys` CNG (`NCrypt*`) in one `ffi` module, `tpmd-store`, `p256` |
 | `tpmd-ipc` | Local endpoints, native caller authentication, secure filesystem, framed I/O | `tokio`, `libc` / `windows-sys` |
 | `tpmd` | Daemon: serve loop, caller auth, namespace + floor enforcement, backend registry and selection, CLI | the above |
 | `tpmd-client` | Consumer API hiding the transport | `tpmd-proto`, `tpmd-ipc` |
@@ -64,10 +65,13 @@ graph TD
   daemon --> backend["tpmd-backend"]
   daemon --> dummy["tpmd-backend-dummy"]
   daemon --> linuxtpm["tpmd-backend-linux-tpm<br/>(Linux only)"]
+  daemon --> wincng["tpmd-backend-windows-cng<br/>(Windows only)"]
   dummy --> backend
   dummy --> store["tpmd-store"]
   linuxtpm --> backend
   linuxtpm --> store
+  wincng --> backend
+  wincng --> store
   store --> proto
   demo["tpmd-demo"] --> client
 ```
@@ -128,6 +132,7 @@ hardware > sealed > keyring > file
 | Store protection | dir `0700`, DB `0600`; the WAL `-wal`/`-shm` sidecars live in that directory | same | protected owner-only DACL on dir and file |
 | Pipe protection | — | — | protected owner-only DACL on the pipe |
 | TPM device | `/dev/tpmrm0`…`tpmrm15`, then `/dev/tpm0` (override `TPMD_TPM_DEVICE`); normally `tss:tss 0660` | — | — |
+| Hardware custody | Linux TPM 2.0 (per-user or `tss` service) | — | CNG Platform Crypto Provider, per-user key store under `%APPDATA%\Microsoft\Crypto\PCPKSP\<SID>` |
 
 The `tpmd-client` looks for the user-scoped endpoint first, then the system
 endpoint, so an application does not care whether the daemon runs per-user or
@@ -172,6 +177,31 @@ persisted; the storage parent is recreated deterministically on each run.
 | Device permissions | `/dev/tpmrm*` is `tss:tss 0660`; the system daemon runs as `tss` and clients never open the device |
 | Key loss | a firmware reset or `TPM2_Clear` invalidates the parent → reload fails with `TPM_RC_INTEGRITY`, surfaced as `key_loss` (re-pair), never a silent re-mint |
 | Transient access failure | an unopenable device is `backend_unavailable`, distinct from a policy mismatch |
+
+## Windows CNG custody (WVR-144)
+
+The Windows backend is one crate per mechanism, like the others:
+`tpmd-backend-windows-cng`, compiled only on Windows. It reaches **`hardware`**
+through CNG's Microsoft Platform Crypto Provider and deliberately offers no
+`sealed` rung — a DPAPI-wrapped software key is not sealing, so advertising one
+would be a lie. All FFI lives in a single `ffi` module (the second and last
+place in the workspace where `unsafe` is allowed, after `tpmd-ipc`'s `winutil`),
+which is what keeps the rest of the crate safe code and cross-checkable.
+
+| Aspect | Behaviour |
+| --- | --- |
+| Key context | The **owning user's** per-user CNG store; machine keys are not used. The agent is a silent per-user process with no window, started at logon (the autostart mechanism belongs to WVR-149). |
+| Provider | `NCryptOpenStorageProvider(MS_PLATFORM_CRYPTO_PROVIDER)`; a machine without a usable TPM fails here, which is how `can_be_used()` finds out. |
+| Custody check | Export policy must be `0` **and** `PCP_PLATFORM_TYPE` must report TPM 2.0. A key failing either is **destroyed** and the provision returns `backend_unavailable` — never a `hardware` claim we cannot back. |
+| Usability probe | At every daemon start: create a transient non-exportable key, sign a fixed digest, export its public half, delete it. Cached for the process. This exists because the recorded evidence shows a *network* logon opening the provider and then being refused at key creation. |
+| Encoding | `EccPublicBlob` (`ECS1 ‖ cbKey ‖ X ‖ Y`, 72 B) → 33-byte SEC1 compressed via the `Y` parity; `NCryptSignHash` already returns raw 64-byte `r ‖ s`. |
+| Persistence | The native key lives in the user's CNG store; the shared SQLite file holds only the name → fingerprint mapping and metadata (`cng_keys`). |
+| Recovery | A row whose native key has gone is `key_loss` (re-pair); a refused session is `backend_unavailable`. Orphans (a native key without its row) are listed with `certutil -key -csp "Microsoft Platform Crypto Provider"`. `LocalSystem` cannot use an interactive user's keys, so that is unsupported rather than silently attempted. |
+
+**Evidence status:** the recorded CNG signature was produced on an emulated TPM
+(swtpm). A vTPM proves the API path, encodings and privilege model — it does
+**not** prove hardware residency, so real Windows hardware evidence is still
+owed.
 
 ## Signing contract
 
@@ -226,7 +256,7 @@ is reachable):
 
 ## Out of scope
 
-Keyring, Windows CNG and macOS Secure Enclave backends, and the Linux/user mode
-of the TPM crate (WVR-142/143/144/151); packaging and installers
+The OS-keyring backend (WVR-151), the macOS Secure Enclave backend (WVR-142) and
+the Linux/user mode of the TPM crate (WVR-143); packaging and installers
 (WVR-145…150); any real relay (the demo's relay is simulated); `sign_prehash`;
 additional algorithms.

@@ -24,6 +24,7 @@ Read, in order:
 | `tpmd-store` | SeaORM entities + migrations for the single shared SQLite file. |
 | `tpmd-backend-dummy` | SQLite P-256 store (level `file`). |
 | `tpmd-backend-linux-tpm` | Linux TPM 2.0 store (levels `sealed`, `hardware`); hand-rolled transport. |
+| `tpmd-backend-windows-cng` | Windows CNG Platform Crypto Provider store (level `hardware`); one `unsafe` FFI module. |
 | `tpmd-ipc` | Local endpoints, caller auth, secure filesystem, framed I/O. |
 | `tpmd` | The daemon, its backend registry and its CLI. |
 | `tpmd-client` | Consumer API. |
@@ -35,8 +36,10 @@ Read, in order:
 - Cryptographic line matches Tunnel Weaver so signatures verify with
   `weaver_mux::auth::verify`: `p256 0.14`, `sha2`/`postcard` as pinned in the
   workspace `Cargo.toml`.
-- `#![forbid(unsafe_code)]` everywhere except `tpmd-ipc`, whose Windows module
-  (`winutil`) is the only place `unsafe` is allowed.
+- `#![forbid(unsafe_code)]` everywhere except two deliberately scoped FFI
+  modules, each reviewed as a unit: `tpmd-ipc`'s Windows module (`winutil`, for
+  pipe DACLs and peer SIDs) and `tpmd-backend-windows-cng`'s `ffi` module (for
+  CNG/NCrypt). Nothing else may use `unsafe`.
 - Every public item is documented (`#![warn(missing_docs)]`); comments explain
   **why**, not what.
 - Backends are one crate per mechanism, gated so a build for one OS never
@@ -77,6 +80,16 @@ sudo ./target/debug/deps/device-<hash>          # or: sudo -g tss …
 `tpm2-tools` is used only as a development reference for the TPM wire format;
 it is **not** a build or runtime dependency (the transport is hand-rolled).
 The daemon's store is one SeaORM-managed SQLite file in WAL mode.
+
+The Windows CNG tests (`crates/tpmd-backend-windows-cng/tests/device.rs`) need a
+live TPM 2.0 **and** a logon that may create a Platform Crypto Provider *user*
+key. They **self-skip** otherwise, which keeps the TPM-less `windows-latest`
+runner green. Note that WinRM is a *network* logon, where user-key creation is
+refused: run them on the rig from the user's interactive session, e.g. through a
+scheduled task with `/IT`.
+
+The agent is a silent per-user process on Windows (no window); `tpmd status` is
+the first-class way to ask whether one is running and what it can do.
 
 ## Anti-patterns
 

@@ -17,6 +17,11 @@ tpmd-proto.workspace = true
 tpmd-backend.workspace = true
 tpmd-backend-dummy.workspace = true
 tpmd-ipc.workspace = true
+# The daemon ships its own diagnostic client so that "is it running, and what
+# can it do?" has a first-class answer (and so the published client library is
+# exercised by the same binary it serves). It does not create a dependency
+# cycle: the client does not know about the daemon.
+tpmd-client.workspace = true
 async-trait.workspace = true
 clap.workspace = true
 tokio.workspace = true
@@ -29,9 +34,12 @@ thiserror.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 tpmd-backend-linux-tpm.workspace = true
 
+# Likewise the Windows CNG backend exists only on Windows.
+[target.'cfg(target_os = "windows")'.dependencies]
+tpmd-backend-windows-cng.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
-tpmd-client.workspace = true
 tpmd-ipc.workspace = true
 tpmd-proto.workspace = true
 p256.workspace = true
