@@ -75,18 +75,22 @@ for image in $images; do
 	fi
 	printf '\n== %s (%s/%s)\n' "$image" "$distro" "$codename"
 
-	if docker run --rm $mount --env TPMD_DEB_NAME="${deb##*/}" "$image" sh -eu -c '
+	if docker run --rm $mount --env TPMD_DEB_NAME="${deb##*/}" \
+		--env TPMD_VERIFY_COMPONENT="${TPMD_VERIFY_COMPONENT:-main}" \
+		"$image" sh -eu -c '
 		export DEBIAN_FRONTEND=noninteractive
 		apt-get update -qq
 		apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg systemd >/dev/null
 
 		# Step 1: install the package the way a user would — from the published
-		# repository, or from a local file when one was named.
+		# repository, or from a local file when one was named. The component is
+		# the channel: `main` is what the setup script configures by default, and
+		# a nightly lives in `nightly`, so the check has to ask for it.
 		if [ -n "${TPMD_DEB_NAME:-}" ]; then
 			apt-get install -y -qq "/debs/${TPMD_DEB_NAME}" >&2
 		else
 			curl -1sLf "'"$base"'/cfg/setup/bash.deb.sh" \
-				| distro='"$distro"' codename='"$codename"' bash
+				| distro='"$distro"' codename='"$codename"' component='"${TPMD_VERIFY_COMPONENT:-main}"' bash
 			apt-get update -qq
 			apt-get install -y -qq tpmd >&2
 		fi
