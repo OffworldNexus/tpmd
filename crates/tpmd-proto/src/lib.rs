@@ -30,9 +30,9 @@ mod wire;
 pub use frame::{FRAME_LEN_BYTES, FrameError, decode_frame, encode_frame, parse_frame_len};
 pub use types::{Algorithm, KeyId, SecurityLevel, Signature};
 pub use wire::{
-    Capabilities, Closed, ErrorCode, ErrorDetail, ErrorReply, Hello, KeyInfo, KeyOutcome,
-    KeyRequest, Limits, Message, Op, ProvisionRequest, Reject, RejectCode, Reply, Request,
-    Response, Status, StoreState, Welcome,
+    BackendSelection, Capabilities, Closed, ErrorCode, ErrorDetail, ErrorReply, Hello, KeyInfo,
+    KeyOutcome, KeyRequest, Limits, Message, Op, ProvisionRequest, Reject, RejectCode, Reply,
+    Request, Response, Status, StoreState, Welcome,
 };
 
 /// Lowest protocol version this build accepts.

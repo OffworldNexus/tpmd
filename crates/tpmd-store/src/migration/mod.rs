@@ -9,6 +9,7 @@ pub mod m20260101_000001_create_keys;
 pub mod m20260101_000002_create_tpm_keys;
 pub mod m20260101_000003_create_cng_keys;
 pub mod m20260101_000004_create_keyring_keys;
+pub mod m20260101_000005_create_settings;
 
 use sea_orm_migration::prelude::*;
 
@@ -23,6 +24,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260101_000002_create_tpm_keys::Migration),
             Box::new(m20260101_000003_create_cng_keys::Migration),
             Box::new(m20260101_000004_create_keyring_keys::Migration),
+            Box::new(m20260101_000005_create_settings::Migration),
         ]
     }
 }

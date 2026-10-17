@@ -378,6 +378,7 @@ Status {
   default_level : SecurityLevel,
   default_min_security : SecurityLevel,   // daemon's configured default floor (sealed)
   store         : StoreState,             // Open | Closed(Closed) — §9.1
+  selection     : BackendSelection,       // which backend this machine chose — §11
 }
 ```
 
@@ -638,6 +639,24 @@ Hardware > Sealed > Keyring > File
   not a reason to fall to a plainer store, and doing so would be a silent custody
   change. The ladder therefore skips only a backend whose dependency is **gone**
   (§9.1), and reports it with the reason.
+- **The choice is sticky.** It is made once, recorded, and never changed by the
+  daemon: closing produces `closed`, a vanished dependency produces
+  `backend_unavailable`, and both arrive from the *remembered* backend. `status`
+  reports the choice in `selection`:
+
+```
+BackendSelection {
+  backend            : String,          // the backend serving this connection
+  chosen_unix        : Option<i64>,     // when it was committed; None while nothing has served
+  reason             : Option<String>,  // why, in the daemon's words
+  stronger_available : Option<String>,  // what the ladder would pick now — information, not an action
+}
+```
+
+  `stronger_available` is the one part that is advisory: adopting it re-keys the
+  device, so it is an administrator's decision (the CLI's `backend` verb) and
+  never the daemon's. Changing the backend by hand — or forgetting the record —
+  is therefore outside the protocol entirely: it is a local administrative act.
 - The demo and tests opt in at `file`, proving both the refusal and the
   consented path.
 - The daemon reports the *achieved* level truthfully in `WELCOME`, `status`,

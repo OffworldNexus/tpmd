@@ -27,13 +27,16 @@ use tpmd_ipc::{
     Connection, Endpoint, FrameIoError, Listener, SocketAccess, read_message, write_message,
 };
 use tpmd_proto::{
-    Capabilities, Closed, DAEMON_VERSION, ErrorCode, ErrorDetail, ErrorReply, KeyInfo, KeyOutcome,
-    KeyRequest, MAX_NAMESPACE_LEN, Message, Op, Reject, RejectCode, Reply, Response, Status,
-    StoreState, Welcome, default_limits,
+    BackendSelection, Capabilities, Closed, DAEMON_VERSION, ErrorCode, ErrorDetail, ErrorReply,
+    KeyInfo, KeyOutcome, KeyRequest, MAX_NAMESPACE_LEN, Message, Op, Reject, RejectCode, Reply,
+    Response, Status, StoreState, Welcome, default_limits,
 };
 use tracing::{info, warn};
 
 pub mod registry;
+pub mod selection;
+
+use selection::{SelectionRecord, SelectionRecorder, SelectionStore, now_unix};
 
 /// How long to wait for the `HELLO` before giving up on a connection.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -61,6 +64,22 @@ pub struct Config {
 /// Errors that stop the daemon entirely.
 #[derive(Debug, Error)]
 pub enum DaemonError {
+    /// The shared store could not be opened, so the machine's choice cannot even
+    /// be read.
+    #[error("opening the store: {0}")]
+    Store(#[source] BackendError),
+    /// `--backend` contradicted what this machine already chose.
+    #[error(
+        "backend {named:?} was asked for, but this machine has chosen {recorded:?}; \
+         run `tpmd backend set {named}` to change it deliberately (it re-keys the \
+         device, so applications may have to pair again)"
+    )]
+    ContradictsRecord {
+        /// The backend the command line named.
+        named: String,
+        /// The backend this machine has chosen.
+        recorded: String,
+    },
     /// No backend could be selected.
     #[error("backend selection: {0}")]
     Selection(#[from] registry::SelectionError),
@@ -106,15 +125,81 @@ pub fn state_dir() -> PathBuf {
 
 /// Run the daemon until interrupted.
 pub async fn run(config: Config) -> Result<(), DaemonError> {
-    let selection = registry::select(
-        &registry::builtin_factories(),
-        &config.state_dir,
-        config.backend.as_deref(),
-    )
-    .await?;
-    let backend = selection.backend;
+    // The record lives in the shared store, which is backend-agnostic — so the
+    // daemon opens it and reads what this machine chose *before* constructing
+    // anything. Otherwise choosing would require having already chosen.
+    let db = tpmd_store::open(&config.state_dir)
+        .await
+        .map_err(DaemonError::Store)?;
+    let store = SelectionStore::new(db);
+    let recorded = store.read().await.map_err(DaemonError::Store)?;
+
+    let factories = registry::builtin_factories();
+    let (backend, recorder, stronger, skipped) = match recorded {
+        Some(record) => {
+            // **Sticky.** The machine has chosen; `--backend` may agree with the
+            // record but never contradict it, because a flag that silently
+            // overrode the choice would be the automatic change this exists to
+            // stop, wearing a command-line coat.
+            if let Some(named) = config.backend.as_deref()
+                && named != record.backend
+            {
+                return Err(DaemonError::ContradictsRecord {
+                    named: named.to_owned(),
+                    recorded: record.backend.clone(),
+                });
+            }
+            let backend: Arc<dyn Backend> = Arc::from(
+                registry::open_named(&factories, &record.backend, &config.state_dir).await?,
+            );
+            // What an administrator *could* adopt instead. Information: adopting
+            // it re-keys the device, so it is never automatic.
+            let survey = registry::survey(&factories, &config.state_dir).await;
+            let stronger = survey
+                .strongest()
+                .filter(|candidate| candidate.default_level() > backend.default_level())
+                .map(|candidate| candidate.name().to_owned());
+            (
+                backend,
+                SelectionRecorder::settled(store, record),
+                stronger,
+                survey.skipped_owned(),
+            )
+        }
+        None => {
+            // First start: run the ladder. A store that is merely *closed* is a
+            // candidate, so a daemon that happens to start before the user
+            // unlocks does not settle the machine on a plainer store.
+            let chosen =
+                registry::select(&factories, &config.state_dir, config.backend.as_deref()).await?;
+            let skipped = chosen.skipped_owned();
+            let backend = chosen.backend;
+            let record = SelectionRecord {
+                backend: backend.name().to_owned(),
+                chosen_unix: now_unix(),
+                reason: match config.backend.as_deref() {
+                    Some(named) => format!("{named} was named on the command line"),
+                    None => "the strongest backend that could serve here".to_owned(),
+                },
+                skipped: skipped.clone(),
+            };
+            (
+                backend,
+                SelectionRecorder::pending(store, record),
+                None,
+                skipped,
+            )
+        }
+    };
+
+    let selection = Arc::new(SelectionView {
+        backend: backend.name().to_owned(),
+        recorder,
+        stronger_available: stronger,
+        skipped,
+    });
     for (name, reason) in &selection.skipped {
-        info!(backend = name, reason = %reason, "backend skipped");
+        info!(backend = name, reason = %reason, "backend passed over");
     }
     // One watcher for the process, shared by every connection and every parked
     // client: the store's state is a property of the backend, not of a client.
@@ -123,6 +208,7 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
         backend = backend.name(),
         store = backend.store_mechanism().unwrap_or("-"),
         store_state = store_watch.status().reason().unwrap_or("open"),
+        remembered = selection.remembers(),
         "backend selected"
     );
 
@@ -142,12 +228,14 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
                     Ok(connection) => {
                         let backend = Arc::clone(&backend);
                         let store_watch = Arc::clone(&store_watch);
+                        let selection = Arc::clone(&selection);
                         let default_min_security = config.default_min_security;
                         tokio::spawn(async move {
                             if let Err(error) = handle_connection(
                                 connection,
                                 backend,
                                 store_watch,
+                                selection,
                                 default_min_security,
                             )
                             .await
@@ -184,6 +272,7 @@ async fn handle_connection(
     mut connection: Connection,
     backend: Arc<dyn Backend>,
     store_watch: Arc<StoreWatch>,
+    selection: Arc<SelectionView>,
     default_min_security: tpmd_proto::SecurityLevel,
 ) -> Result<(), FrameIoError> {
     let limits = default_limits();
@@ -253,6 +342,9 @@ async fn handle_connection(
 
         match establish_key(backend.as_ref(), &session, hello.key).await {
             Ok(key) => {
+                // A *liveness* probe touches no store, so it is not evidence that
+                // this machine's store served: only a key outcome is.
+                let served = !matches!(key, KeyOutcome::None);
                 let welcome = Welcome {
                     version,
                     principal: principal.clone(),
@@ -261,6 +353,12 @@ async fn handle_connection(
                     key,
                 };
                 write_message(&mut connection.stream, &Message::Welcome(welcome)).await?;
+                if served {
+                    // The store just served a key request, which is the first
+                    // *successful use* a fresh machine can have — so this is where
+                    // a choice made at startup stops being provisional.
+                    selection.recorder.commit().await;
+                }
                 break session;
             }
             // Closed, not fatal: tell the client, keep the socket, let it wait or
@@ -305,6 +403,7 @@ async fn handle_connection(
             Ok(Ok(Message::Request(request))) => {
                 let watch = Arc::clone(&store_watch);
                 let backend = Arc::clone(&backend);
+                let selection = Arc::clone(&selection);
                 let session_owner = session.owner.clone();
                 let namespace = session.namespace.clone();
                 let default_min_security = session.default_min_security;
@@ -317,12 +416,25 @@ async fn handle_connection(
                         namespace,
                         default_min_security,
                     };
-                    let result = dispatch(&watch, backend.as_ref(), &session, request.op).await;
+                    let result = dispatch(
+                        &watch,
+                        selection.as_ref(),
+                        backend.as_ref(),
+                        &session,
+                        request.op,
+                    )
+                    .await;
                     // Whatever the operation did, the backend may have learned
                     // something about its store — a refusal is *how* the daemon
                     // finds out a keychain has been locked — so one cheap, cached
                     // read keeps the announce and `status` honest.
                     watch.note(backend.store_status());
+                    // An operation that succeeded is a store that served, which is
+                    // what settles a provisional choice.
+                    if result.is_ok() {
+                        // Open (or closed): either way nothing is left to watch for.
+                        selection.recorder.commit().await;
+                    }
                     let _ = outbound
                         .send(Message::Response(Response {
                             id: request.id,
@@ -372,6 +484,41 @@ struct Session {
     owner: Owner,
     namespace: String,
     default_min_security: tpmd_proto::SecurityLevel,
+}
+
+/// This machine's backend choice, as the process holds it.
+///
+/// Shared by every connection, because it is a property of the machine and not of
+/// a client. The recorder inside it commits the choice the first time something
+/// actually serves, and stops mattering after that.
+struct SelectionView {
+    /// The backend serving this process.
+    backend: String,
+    /// The choice: committed, or waiting to be committed on first successful use.
+    recorder: SelectionRecorder,
+    /// A stronger backend the ladder would pick now, if one exists. Reported to an
+    /// administrator through `status`; never acted on.
+    stronger_available: Option<String>,
+    /// What the ladder passed over when the choice was made, for the log.
+    skipped: Vec<(String, String)>,
+}
+
+impl SelectionView {
+    /// Whether the choice has been committed yet.
+    fn remembers(&self) -> bool {
+        self.recorder.committed().is_some()
+    }
+
+    /// The live report for `status`.
+    fn report(&self) -> BackendSelection {
+        let committed = self.recorder.committed();
+        BackendSelection {
+            backend: self.backend.clone(),
+            chosen_unix: committed.as_ref().map(|record| record.chosen_unix),
+            reason: committed.map(|record| record.reason),
+            stronger_available: self.stronger_available.clone(),
+        }
+    }
 }
 
 /// A handshake refusal carrying its structured detail.
@@ -494,6 +641,7 @@ async fn provision_key(
 
 async fn dispatch(
     store_watch: &Arc<StoreWatch>,
+    selection: &SelectionView,
     backend: &dyn Backend,
     session: &Session,
     op: Op,
@@ -516,6 +664,7 @@ async fn dispatch(
             default_level: backend.default_level(),
             default_min_security: session.default_min_security,
             store: wire_store_state(&store_watch.status()),
+            selection: selection.report(),
         })),
         Op::Provision(request) => {
             let level = select_level(

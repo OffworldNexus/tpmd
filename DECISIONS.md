@@ -69,6 +69,20 @@ records them.
 | Store state on the wire | `StoreState` on `Capabilities` and `Status`; the same `Closed` shape as the message | `tpmd status` should answer "is it running, and can it sign right now?" without attempting an operation, and a client should parse one shape rather than two. |
 | Concurrency | Requests are dispatched as tasks and answers written by a writer task | A parked `AWAIT` must not stop the connection: the protocol allows pipelined requests and out-of-order answers, and rule 9 lets a waiting client ask `STATUS`. |
 
+## WVR-153 decisions
+
+| Decision | Value | Rationale |
+| --- | --- | --- |
+| Selection is sticky | The backend is chosen once, recorded in the shared store's `settings` table (`backend.selection`), and never changed by the daemon | Re-running the ladder every start let the store serving a device change because a keychain happened to be locked at boot — a custody change, and potentially an *identity* change, since a different store means a different key and pairing again. It is `select_level`'s principle one level up: one place decides, and not silently. |
+| When it is recorded | On the first **successful use**, not at open | Opening a backend only proves it can be probed. A start that answers liveness probes and nothing else has chosen nothing, and `status` says `chosen_unix: null` — which is what stops a store that merely happened to be locked at startup from settling the machine on a weaker one. |
+| Closed rungs | A backend whose store is merely **closed** is a candidate, never skipped | Otherwise the first start (at logon, before anything is unlocked) would permanently commit a plaintext store as this machine's identity. |
+| What the record holds | Backend name, chosen-at, why, and what was passed over with reasons, `postcard`-encoded | "Why this backend?" is a question asked long after the fact, and the reasons contain whatever the platform said — colons, commas and all. A text column would have forced an escaping scheme; the wire's own vocabulary does not. |
+| `--backend` | On a machine that has chosen: must agree with the record, or the daemon **refuses to start** naming `tpmd backend set`. On a machine that has not: it restricts the ladder to that rung | A flag that silently overrode the record would be the automatic change this ticket exists to prevent, wearing a command-line coat. |
+| Administrator's verbs | `tpmd backend` (show), `tpmd backend set <name> --yes`, `tpmd backend clear` | Changing the backend can re-key the device, so it is deliberate, confirmed, and says what it costs. The record is read at startup, so a change takes effect at the next start — documented rather than surprising. |
+| Stronger rung available | Reported in `status` as `selection.stronger_available`, **as information** | An administrator should know what they could adopt, but adopting it re-keys the device: information is the whole of the daemon's role here. |
+| Store naming error | A record naming a backend this build does not have is refused on write (`tpmd backend set` validates), not discovered at startup | Better to refuse the change than to leave a machine whose agent will not start. |
+| Recorded backend that cannot serve | Started anyway, and answers `closed` / `backend_unavailable` | Which is the point of WVR-152: a store that is temporarily shut is a state to report and wait on, not a reason for the daemon to refuse to exist. If the backend cannot even be *constructed* (a missing TPM device node), startup fails loudly rather than swapping in something weaker. |
+
 ## Dependency line
 
 `tpmd` deliberately shares the Tunnel Weaver cryptographic line so signatures
