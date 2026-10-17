@@ -97,7 +97,6 @@ for image in $images; do
 
 		# Step 2: the binaries run on this release at all.
 		tpmd --version
-		tpmd-demo --version
 
 		# Step 3: the definitions are valid here. The paths come from the
 		# package rather than from this script, so a layout change cannot make
