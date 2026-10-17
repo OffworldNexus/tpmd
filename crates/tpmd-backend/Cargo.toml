@@ -12,3 +12,6 @@ repository.workspace = true
 tpmd-proto.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

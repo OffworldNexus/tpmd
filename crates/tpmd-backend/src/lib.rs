@@ -15,6 +15,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use thiserror::Error;
 use tpmd_proto::{Algorithm, KeyId, KeyInfo, SecurityLevel, Signature};
@@ -60,6 +62,68 @@ impl Owner {
             namespace: namespace.into(),
         }
     }
+}
+
+/// What a backend can say about the store behind it.
+///
+/// A backend learns this **by being refused**, never by asking in advance: none
+/// of the platforms we serve offers a change event we can rely on, so a status is
+/// a cached observation, refreshed by a probe — or woken by an [`UnlockHints`]
+/// provider where the platform has one.
+///
+/// The daemon maps these onto the wire: [`StoreStatus::Closed`] becomes the
+/// non-fatal `closed` answer (worth waiting for), [`StoreStatus::Gone`] becomes a
+/// fatal `reject` naming the backend unavailable. The distinction is who can
+/// change it — the user, or nobody.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreStatus {
+    /// The store answers; operations may proceed.
+    Open,
+    /// The store exists but will not answer yet. Something the *user* does can
+    /// change that — unlocking a keychain, logging in — so it is worth waiting
+    /// for rather than failing.
+    Closed(String),
+    /// The store's dependency is gone: no device to open, nothing to talk to.
+    /// Nothing in this process's lifetime brings it back, and choosing another
+    /// backend is an administrator's decision, never an automatic one.
+    Gone(String),
+}
+
+impl StoreStatus {
+    /// Whether operations may proceed right now.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        matches!(self, Self::Open)
+    }
+
+    /// Whether waiting could change anything. Only a *closed* store is waitable;
+    /// a gone one is exactly the case a client must not be parked on.
+    #[must_use]
+    pub fn is_waitable(&self) -> bool {
+        matches!(self, Self::Closed(_))
+    }
+
+    /// The reason, for logs and for the wire.
+    #[must_use]
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Open => None,
+            Self::Closed(reason) | Self::Gone(reason) => Some(reason),
+        }
+    }
+}
+
+/// Something that can tell the daemon the store *might* be usable again.
+///
+/// Hints only, and never a substitute for probing: the daemon asks the store
+/// after every hint, because a hint is an opportunity to check, not a promise.
+/// The Linux Secret Service can raise a real one (a collection unlocking, or the
+/// service reappearing on the bus); macOS and Windows have nothing to subscribe
+/// to, so their implementations resolve after their own interval.
+#[async_trait]
+pub trait UnlockHints: Send + Sync {
+    /// Resolve when the store may have become usable.
+    async fn next_hint(&self);
 }
 
 /// A backend failure, mapped by the daemon onto the wire error taxonomy.
@@ -120,6 +184,37 @@ pub trait Backend: Send + Sync {
     /// with no external dependency, which is usable wherever it builds.
     fn can_be_used(&self) -> bool {
         true
+    }
+
+    /// What the store behind this backend can do right now, from what the
+    /// backend has already observed.
+    ///
+    /// Cheap and side-effect free: it must not touch the store. A backend with no
+    /// store of its own — a file, a device — answers [`StoreStatus::Open`] and lets
+    /// a failed operation say otherwise; one whose store can shut under it (a
+    /// keychain, a credential store) records that here as it is refused.
+    fn store_status(&self) -> StoreStatus {
+        StoreStatus::Open
+    }
+
+    /// Ask the store whether it can serve, and remember the answer.
+    ///
+    /// **Read-only.** A backend must never create, modify or delete anything to
+    /// answer this: the question is asked while a client is waiting, and a probe
+    /// that wrote would be a side effect on a store that may not even be ours.
+    /// Defaults to the cached answer, for a backend with nothing to ask.
+    async fn probe_store(&self) -> StoreStatus {
+        self.store_status()
+    }
+
+    /// The platform's way of telling us the store *might* have opened, where it
+    /// has one.
+    ///
+    /// `None` means the only way to notice is to ask again, which the daemon does
+    /// on its own interval — so a backend that implements nothing here is slower
+    /// to notice a reopened store, never unable to.
+    fn unlock_hints(&self) -> Option<Arc<dyn UnlockHints>> {
+        None
     }
 
     /// The strongest level this backend achieves right now.
@@ -217,6 +312,81 @@ pub fn select_level(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A backend with no store of its own — a file, a device — which is what most
+    /// backends are. The defaults must say so, because the daemon parks a client
+    /// on a *closed* store and on nothing else.
+    struct StorelessBackend;
+
+    #[async_trait]
+    impl Backend for StorelessBackend {
+        fn name(&self) -> &'static str {
+            "storeless"
+        }
+        fn algorithms(&self) -> &'static [Algorithm] {
+            &[Algorithm::EcdsaP256Sha256]
+        }
+        fn levels(&self) -> &'static [SecurityLevel] {
+            &[SecurityLevel::File]
+        }
+        async fn provision(
+            &self,
+            _owner: &Owner,
+            _algorithm: Algorithm,
+            _level: SecurityLevel,
+        ) -> Result<KeyInfo, BackendError> {
+            unimplemented!("the defaults under test never touch a key")
+        }
+        async fn identify(&self, _owner: &Owner, _key_id: &KeyId) -> Result<KeyInfo, BackendError> {
+            unimplemented!()
+        }
+        async fn sign(
+            &self,
+            _owner: &Owner,
+            _key_id: &KeyId,
+            _message: &[u8],
+        ) -> Result<Signature, BackendError> {
+            unimplemented!()
+        }
+        async fn destroy(&self, _owner: &Owner, _key_id: &KeyId) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn a_backend_without_a_store_is_open_and_has_nothing_to_wait_for() {
+        let backend = StorelessBackend;
+        assert_eq!(backend.store_status(), StoreStatus::Open);
+        assert!(backend.store_status().is_open());
+        assert!(!backend.store_status().is_waitable());
+        assert!(
+            backend.unlock_hints().is_none(),
+            "nothing to wait for means nothing to hint about"
+        );
+    }
+
+    #[tokio::test]
+    async fn probing_a_storeless_backend_agrees_with_its_cached_status() {
+        assert_eq!(StorelessBackend.probe_store().await, StoreStatus::Open);
+    }
+
+    /// The distinction the daemon's whole closed/gone policy rests on: waiting
+    /// only ever makes sense for a store the *user* can change.
+    #[test]
+    fn only_a_closed_store_is_waitable() {
+        assert!(StoreStatus::Closed("locked".into()).is_waitable());
+        assert!(!StoreStatus::Gone("no device".into()).is_waitable());
+        assert!(!StoreStatus::Open.is_waitable());
+        assert_eq!(
+            StoreStatus::Closed("locked".into()).reason(),
+            Some("locked")
+        );
+        assert_eq!(
+            StoreStatus::Gone("no device".into()).reason(),
+            Some("no device")
+        );
+        assert_eq!(StoreStatus::Open.reason(), None);
+    }
 
     const DUMMY_LEVELS: &[SecurityLevel] = &[SecurityLevel::File];
 

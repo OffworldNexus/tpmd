@@ -89,6 +89,12 @@ keyring-core = "1.0"
 zbus-secret-service-keyring-store = "1.0"
 apple-native-keyring-store = "1.0"
 windows-native-keyring-store = "1.1"
+# The session bus itself, for noticing that a locked store has reopened. The store
+# crate talks to the Secret Service but does not expose its connection, and an
+# unlock is worth an event rather than a timer — async only, matching what the
+# store already pulls in.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tempfile = "3"
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 # Unix peer-credential retrieval (SO_PEERCRED / LOCAL_PEERCRED) and file modes.

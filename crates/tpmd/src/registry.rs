@@ -132,10 +132,18 @@ pub async fn select(
                 name: name.to_owned(),
                 reason: error.to_string(),
             })?;
-        if !backend.can_be_used() && !backend.forced_when_unusable() {
+        // Forcing a backend whose store is *closed* is honoured: the caller asked
+        // for it, and every operation will say `store_locked` — which is more
+        // useful than a refusal to start. Forcing one that is *gone* is refused
+        // unless the backend asks to be honoured anyway.
+        let status = backend.store_status();
+        if !status.is_open() && !status.is_waitable() && !backend.forced_when_unusable() {
             return Err(SelectionError::Unusable {
                 name: name.to_owned(),
-                reason: "the backend reports it cannot be used on this host".to_owned(),
+                reason: status
+                    .reason()
+                    .unwrap_or("the backend reports it cannot be used on this host")
+                    .to_owned(),
             });
         }
         return Ok(Selection {
@@ -148,11 +156,25 @@ pub async fn select(
     let mut skipped: Vec<(&'static str, String)> = Vec::new();
     for factory in factories {
         match factory.open(state_dir).await {
-            Ok(backend) if backend.can_be_used() => usable.push(backend),
-            Ok(_) => skipped.push((
-                factory.name(),
-                "the backend reports it cannot be used on this host".to_owned(),
-            )),
+            Ok(backend) => {
+                let status = backend.store_status();
+                // A **closed** store is a candidate, not a skip: a locked keychain
+                // is a state the user changes, and the daemon answers it with the
+                // non-fatal `closed` reply while the client waits. Only a *gone*
+                // dependency is passed over, because nothing brings it back —
+                // serving a weaker store instead would be a silent custody change.
+                if status.is_open() || status.is_waitable() {
+                    usable.push(backend);
+                } else {
+                    skipped.push((
+                        factory.name(),
+                        status
+                            .reason()
+                            .unwrap_or("the backend reports it cannot be used on this host")
+                            .to_owned(),
+                    ));
+                }
+            }
             Err(error) => skipped.push((factory.name(), error.to_string())),
         }
     }
@@ -251,15 +273,15 @@ impl BackendFactory for WindowsCngFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tpmd_backend::Owner;
+    use tpmd_backend::{Owner, StoreStatus};
     use tpmd_proto::{Algorithm, KeyId, KeyInfo, SecurityLevel, Signature};
 
-    /// A backend whose only interesting properties are its level and whether
-    /// it claims to be usable.
+    /// A backend whose only interesting properties are its level and what its
+    /// store is doing.
     struct FakeBackend {
         name: &'static str,
         level: SecurityLevel,
-        usable: bool,
+        status: StoreStatus,
         forced: bool,
     }
 
@@ -275,7 +297,10 @@ mod tests {
             &[SecurityLevel::File]
         }
         fn can_be_used(&self) -> bool {
-            self.usable
+            self.status.is_open()
+        }
+        fn store_status(&self) -> StoreStatus {
+            self.status.clone()
         }
         fn forced_when_unusable(&self) -> bool {
             self.forced
@@ -310,7 +335,7 @@ mod tests {
     struct FakeFactory {
         name: &'static str,
         level: SecurityLevel,
-        usable: bool,
+        status: StoreStatus,
         opens: bool,
         forced: bool,
     }
@@ -327,7 +352,7 @@ mod tests {
             Ok(Box::new(FakeBackend {
                 name: self.name,
                 level: self.level,
-                usable: self.usable,
+                status: self.status.clone(),
                 forced: self.forced,
             }))
         }
@@ -338,25 +363,36 @@ mod tests {
     fn fake(
         name: &'static str,
         level: SecurityLevel,
-        usable: bool,
+        status: StoreStatus,
         opens: bool,
         forced: bool,
     ) -> Box<dyn BackendFactory> {
         Box::new(FakeFactory {
             name,
             level,
-            usable,
+            status,
             opens,
             forced,
         })
     }
 
+    /// An open store — the ordinary case.
+    fn open() -> StoreStatus {
+        StoreStatus::Open
+    }
+
     fn factories() -> Vec<Box<dyn BackendFactory>> {
         vec![
-            fake("file", SecurityLevel::File, true, true, false),
-            fake("hw", SecurityLevel::Hardware, true, true, false),
-            fake("broken", SecurityLevel::Hardware, true, false, false),
-            fake("unusable", SecurityLevel::Hardware, false, true, false),
+            fake("file", SecurityLevel::File, open(), true, false),
+            fake("hw", SecurityLevel::Hardware, open(), true, false),
+            fake("broken", SecurityLevel::Hardware, open(), false, false),
+            fake(
+                "gone",
+                SecurityLevel::Hardware,
+                StoreStatus::Gone("no device on this host".into()),
+                true,
+                false,
+            ),
         ]
     }
 
@@ -371,18 +407,57 @@ mod tests {
         // The passed-over ones are reported with a reason.
         let skipped: Vec<&str> = selection.skipped.iter().map(|(n, _)| *n).collect();
         assert!(skipped.contains(&"broken"));
-        assert!(skipped.contains(&"unusable"));
+        assert!(skipped.contains(&"gone"));
         assert!(!skipped.contains(&"file"));
+        // …and the reason says what was actually wrong, not a generic shrug.
+        let (_, reason) = selection
+            .skipped
+            .iter()
+            .find(|(name, _)| *name == "gone")
+            .unwrap();
+        assert!(reason.contains("no device"), "{reason}");
     }
 
     #[tokio::test]
-    async fn a_failing_or_unusable_backend_is_skipped_for_a_weaker_one() {
+    async fn a_failing_or_gone_backend_is_skipped_for_a_weaker_one() {
         let only_weak = vec![
-            fake("broken", SecurityLevel::Hardware, true, false, false),
-            fake("file", SecurityLevel::File, true, true, false),
+            fake("broken", SecurityLevel::Hardware, open(), false, false),
+            fake(
+                "gone",
+                SecurityLevel::Hardware,
+                StoreStatus::Gone("no device".into()),
+                true,
+                false,
+            ),
+            fake("file", SecurityLevel::File, open(), true, false),
         ];
         let selection = select(&only_weak, dir(), None).await.unwrap();
         assert_eq!(selection.backend.name(), "file");
+    }
+
+    /// The rule that makes a locked keychain usable rather than a demotion: a
+    /// **closed** store is a candidate, and it outranks the weaker store beneath
+    /// it. Serving the weaker one instead would be a silent custody change, which
+    /// is exactly what the `closed` answer exists to avoid.
+    #[tokio::test]
+    async fn a_closed_store_is_a_candidate_and_outranks_a_weaker_open_one() {
+        let candidates = vec![
+            fake(
+                "closed-but-strong",
+                SecurityLevel::Keyring,
+                StoreStatus::Closed("the keychain is locked".into()),
+                true,
+                false,
+            ),
+            fake("file", SecurityLevel::File, open(), true, false),
+        ];
+        let selection = select(&candidates, dir(), None).await.unwrap();
+        assert_eq!(
+            selection.backend.name(),
+            "closed-but-strong",
+            "a closed rung must be chosen over a weaker open one"
+        );
+        assert!(selection.skipped.is_empty(), "nothing was skipped");
     }
 
     #[tokio::test]
@@ -404,10 +479,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forcing_an_unusable_backend_is_refused_distinctly() {
-        let error = select(&factories(), dir(), Some("unusable"))
-            .await
-            .unwrap_err();
+    async fn forcing_a_gone_or_failing_backend_is_refused_distinctly() {
+        let error = select(&factories(), dir(), Some("gone")).await.unwrap_err();
         assert!(matches!(error, SelectionError::Unusable { .. }));
 
         let error = select(&factories(), dir(), Some("broken"))
@@ -416,14 +489,36 @@ mod tests {
         assert!(matches!(error, SelectionError::Unusable { .. }));
     }
 
+    /// Forcing a backend whose store is merely *closed* is honoured: the caller
+    /// asked for it, and every operation will say `store_locked` — which is more
+    /// useful than refusing to start.
+    #[tokio::test]
+    async fn forcing_a_closed_backend_is_honoured() {
+        let candidates = vec![fake(
+            "closed",
+            SecurityLevel::Keyring,
+            StoreStatus::Closed("the keychain is locked".into()),
+            true,
+            false,
+        )];
+        let selection = select(&candidates, dir(), Some("closed")).await.unwrap();
+        assert_eq!(selection.backend.name(), "closed");
+    }
+
     /// A backend that can explain its own unreachability is honoured when
-    /// forced, so `--backend keyring` on a host with no session bus reports the
-    /// store's problem instead of refusing to start.
+    /// forced, so `--backend keyring` on a host with no store reports the store's
+    /// problem instead of refusing to start.
     #[tokio::test]
     async fn forcing_a_self_explaining_backend_is_honoured() {
         let candidates = vec![
-            fake("file", SecurityLevel::File, true, true, false),
-            fake("self-explaining", SecurityLevel::Keyring, false, true, true),
+            fake("file", SecurityLevel::File, open(), true, false),
+            fake(
+                "self-explaining",
+                SecurityLevel::Keyring,
+                StoreStatus::Gone("no session bus".into()),
+                true,
+                true,
+            ),
         ];
         let selection = select(&candidates, dir(), Some("self-explaining"))
             .await

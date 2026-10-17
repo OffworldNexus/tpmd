@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::types::{Algorithm, KeyId, SecurityLevel, Signature};
 
 /// Anything that can appear as a framed message on the wire.
+///
+/// Variants are **appended, never inserted**: Postcard encodes the variant index,
+/// so reordering would silently reinterpret existing frames.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Message {
     /// First client message: declares versions, namespace and the key request.
@@ -23,6 +26,9 @@ pub enum Message {
     Request(Request),
     /// The answer to a [`Request`], matched by `id`.
     Response(Response),
+    /// The store is closed: the daemon cannot serve yet, but the connection
+    /// stays open and the client may wait for it (see [`Op::Await`]).
+    Closed(Closed),
 }
 
 /// Client → daemon, first frame.
@@ -127,6 +133,9 @@ pub struct Capabilities {
     pub key_id_encoding: String,
     /// Signature encoding, e.g. `"raw-r-s"`.
     pub signature_encoding: String,
+    /// Whether the store can serve right now. Appended last, because Postcard is
+    /// positional: new fields go at the end or they change every existing frame.
+    pub store: StoreState,
 }
 
 /// Connection limits, enforced by both sides.
@@ -170,6 +179,46 @@ pub enum RejectCode {
     IncompatiblePolicy,
     /// Key establishment failed for another reason.
     KeyError,
+    /// The backend's own dependency is gone: no device to open, no session bus,
+    /// nothing to talk to. **Fatal and not waitable** — nothing in this daemon's
+    /// lifetime will bring it back, and choosing another backend is an
+    /// administrator's decision, never an automatic one.
+    BackendUnavailable,
+}
+
+/// Daemon → client: the store is closed, and this is *not* fatal.
+///
+/// The only refusal that leaves the connection open, and deliberately distinct
+/// from [`Reject`]: a user-session store is *normally* shut whenever the screen
+/// is locked, so a client must be able to tell "come back later" from "you spoke
+/// nonsense" without knowing anything about our implementation.
+///
+/// It is never [`ErrorCode::UnknownKey`], [`ErrorCode::KeyLoss`] or
+/// [`ErrorCode::PermissionDenied`]; it never means the connection is over; and a
+/// client may wait for the store to open (see [`Op::Await`]) rather than guess
+/// when to retry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Closed {
+    /// The reason class: [`ErrorCode::StoreLocked`].
+    pub code: ErrorCode,
+    /// Human-readable detail.
+    pub message: String,
+    /// Structured detail, mirroring [`Reject`] and [`ErrorReply`].
+    pub detail: Option<ErrorDetail>,
+}
+
+/// Whether the daemon's store can serve right now.
+///
+/// Announced in [`Capabilities`] and [`Status`] so a client can tell "is it
+/// running?" from "can it sign right now?" without attempting an operation, and
+/// so an operator has a window on a daemon whose store is shut. It carries the
+/// same report as the [`Closed`] message, so a client parses one shape, not two.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StoreState {
+    /// The store answers.
+    Open,
+    /// The store exists but will not answer yet.
+    Closed(Closed),
 }
 
 /// A request on an established connection.
@@ -205,6 +254,12 @@ pub enum Op {
         /// The fingerprint to destroy.
         key_id: KeyId,
     },
+    /// Ask to be told when the store can serve, rather than guessing when to
+    /// come back. Deliberately carries **no timing**: noticing that the store
+    /// has opened is the daemon's business — it is the component that knows what
+    /// its dependency is — and asking a client for an interval would only
+    /// invite it to poll.
+    Await,
 }
 
 /// The answer to a [`Request`].
@@ -229,6 +284,10 @@ pub enum Reply {
     Signature(Signature),
     /// Answer to [`Op::Destroy`].
     Destroyed,
+    /// Answer to [`Op::Await`]: the store is usable again. Capabilities are
+    /// re-announced because the achieved level can differ from the one announced
+    /// before the store closed.
+    Opened(Capabilities),
 }
 
 /// The daemon/connection description returned by [`Op::Status`].
@@ -248,6 +307,9 @@ pub struct Status {
     pub default_level: SecurityLevel,
     /// The daemon's configured default floor.
     pub default_min_security: SecurityLevel,
+    /// Whether the store can serve right now, so `tpmd status` answers "is it
+    /// running, and can it sign?" without attempting an operation.
+    pub store: StoreState,
 }
 
 /// A failed request.
@@ -351,6 +413,29 @@ mod tests {
             hex::encode(crate::encode_frame(&response)),
             "0000000404010004"
         );
+
+        // The closed-store additions are *appends*, so nothing above moved: the
+        // tags `Request` and `Response` were 03 and 04 before and still are.
+        let closed = Message::Closed(Closed {
+            code: ErrorCode::StoreLocked,
+            message: "locked".into(),
+            detail: None,
+        });
+        // length=10 | Closed(05) StoreLocked(06) len=6 "locked" None(00)
+        assert_eq!(
+            hex::encode(crate::encode_frame(&closed)),
+            "0000000a0506066c6f636b656400"
+        );
+
+        let await_op = Message::Request(Request {
+            id: 1,
+            op: Op::Await,
+        });
+        // length=3 | Request(03) id=1 Await(05)
+        assert_eq!(
+            hex::encode(crate::encode_frame(&await_op)),
+            "00000003030105"
+        );
     }
 
     #[test]
@@ -385,9 +470,15 @@ mod tests {
                 default_level: SecurityLevel::File,
                 key_id_encoding: "sec1-compressed".into(),
                 signature_encoding: "raw-r-s".into(),
+                store: StoreState::Open,
             },
             limits: crate::default_limits(),
             key: KeyOutcome::Created(sample_info()),
+        }));
+        round_trip(&Message::Closed(Closed {
+            code: ErrorCode::StoreLocked,
+            message: "the keychain is locked".into(),
+            detail: None,
         }));
         round_trip(&Message::Reject(Reject {
             code: RejectCode::UnsupportedVersion,
@@ -434,6 +525,28 @@ mod tests {
                 levels: vec![SecurityLevel::File],
                 default_level: SecurityLevel::File,
                 default_min_security: SecurityLevel::Sealed,
+                store: StoreState::Closed(Closed {
+                    code: ErrorCode::StoreLocked,
+                    message: "the keychain is locked".into(),
+                    detail: None,
+                }),
+            })),
+        }));
+        round_trip(&Message::Request(Request {
+            id: 45,
+            op: Op::Await,
+        }));
+        round_trip(&Message::Response(Response {
+            id: 45,
+            result: Ok(Reply::Opened(Capabilities {
+                daemon: crate::DAEMON_VERSION.into(),
+                backend: "keyring".into(),
+                algorithms: vec![Algorithm::EcdsaP256Sha256],
+                levels: vec![SecurityLevel::Keyring],
+                default_level: SecurityLevel::Keyring,
+                key_id_encoding: "sec1-compressed".into(),
+                signature_encoding: "raw-r-s".into(),
+                store: StoreState::Open,
             })),
         }));
     }

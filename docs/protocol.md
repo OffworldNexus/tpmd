@@ -152,6 +152,14 @@ stateDiagram-v2
 
 ## 6. Wire format
 
+**The shape is not stable until the first release.** `postcard` is positional, so
+*appending* a struct field or an enum variant leaves every existing frame
+byte-identical — which is how `CLOSED`, `AWAIT`, `OPENED` and the two `store`
+fields arrived without moving `PROTOCOL_VERSION` off 1. Nothing has been
+released, so there is no peer to be backward-compatible with; the version
+negotiation in §7 exists for the day that changes, and the first *released* wire
+change is when a bump becomes real.
+
 ### 6.1 Transport and endpoint discovery
 
 | Platform | Single-user endpoint | Shared/system endpoint | Caller authentication |
@@ -281,6 +289,7 @@ Capabilities {
   default_level      : SecurityLevel,      // achieved now: File
   key_id_encoding    : String,             // "sec1-compressed" (33 bytes)
   signature_encoding : String,             // "raw-r-s" (64 bytes)
+  store              : StoreState,         // Open | Closed(Closed) — §9.1
 }
 
 enum Algorithm { EcdsaP256Sha256 }
@@ -308,6 +317,25 @@ enum RejectCode {
 A refused key establishment carries the same structured [`ErrorDetail`] as a
 failed request, so a client can retry with `allow_below_floor` after seeing
 exactly which level was required and which was available.
+
+### `CLOSED` (daemon → client, **not fatal**)
+
+```
+Closed { code : ErrorCode, message : String, detail : Option<ErrorDetail> }
+```
+
+The one answer that says "not now" without saying goodbye. It is sent when the
+store that holds the keys is **shut** — a locked keychain, a locked Secret
+Service collection — which for a user-session store is *normal*, not a failure.
+
+`REJECT` closes the connection and means something fatal (bad handshake, no
+version in common, a dependency that is gone). `CLOSED` keeps it open, is never
+`unknown_key`, `key_loss` or `permission_denied`, and is followed by one of:
+
+* `AWAIT` (§8.7), and then `OPENED` when the store can serve;
+* a fresh `HELLO`, which is how a client tries again once it has been told the
+  store is open — establishment stays atomic, and the daemon never resumes a
+  handshake by itself.
 
 ## 8. Operations (after handshake)
 
@@ -349,6 +377,7 @@ Status {
   levels        : Vec<SecurityLevel>,
   default_level : SecurityLevel,
   default_min_security : SecurityLevel,   // daemon's configured default floor (sealed)
+  store         : StoreState,             // Open | Closed(Closed) — §9.1
 }
 ```
 
@@ -411,6 +440,34 @@ key only by its fingerprint, which it must already know. This matches "if you
 know you know" and stops a same-user process from discovering another app's
 keys.
 
+### 8.7 `await` — told when the store can serve, instead of guessing
+
+```
+Op::Await                    // no arguments, and deliberately no timing
+Reply::Opened(Capabilities)   // the store is usable again
+```
+
+`AWAIT` asks the daemon to answer when its store can serve. It carries **no
+timing parameter**, because noticing that a store reopened is the daemon's
+business: it is the component that knows what its own dependency is, and a
+`retry_after` would only invite a client to poll something better informed than
+itself. One request, one answer.
+
+* Store **open** → answered immediately with `OPENED` and fresh capabilities.
+* Store **closed** → the daemon *parks* the request, waiting on its own
+  detection (a session-bus signal on Linux, an interval elsewhere), and answers
+  `OPENED` when the store comes back.
+* Store **gone** while waiting → answered with `backend_unavailable`, and the
+  connection closes. Nothing is left parked on a dependency that will not return.
+* Store **gone** already → refused outright, with no wait offered at all.
+
+`OPENED` is a **snapshot, not a promise**: the very next operation may still be
+refused if the store shut again, and a client may `AWAIT` once more.
+
+Other requests may be answered while an `AWAIT` is outstanding — responses are
+matched by `id`, and the daemon answers out of order — so a waiting client can
+still ask `STATUS`.
+
 ## 9. Errors
 
 ```mermaid
@@ -453,6 +510,86 @@ unavailable" is a *transport* condition (connect/read fails), distinct from
 `key_loss`. Key loss never auto-recovers with a weaker key behind the
 caller's back; the caller learns via `Created` (or `incompatible_policy`) and
 re-pairs.
+
+### 9.1 A closed store is a state, not an error
+
+The store that holds keys is user-session-scoped, so it is **shut a lot of the
+time**: the screen is locked, the user is logged out, the keyring daemon has not
+started yet. Two conditions hide behind "it will not answer", and they are told
+apart by **who can change it**:
+
+| | **closed** | **gone** |
+| --- | --- | --- |
+| Means | the dependency exists, but will not answer yet | the dependency is not there, or cannot be opened at all |
+| Examples | login keychain locked, Secret Service collection locked | no TPM device node, no session bus at all, provider refuses to open |
+| Who changes it | **the user** — unlock it, log in | nobody, for this daemon's lifetime |
+| Answer | `CLOSED` (not fatal), and `AWAIT` is worth it | `REJECT backend_unavailable` (fatal), no wait offered |
+| Client should | wait, or retry later | tell its user that tpmd needs an administrator |
+
+The daemon decides which it is, because only the backend knows its own
+dependency: it **probes existence** rather than reading error text (which
+differs per platform and per provider, and has misled before). Waiting is only
+ever offered for a *closed* store, so a client can never be parked on something
+that will not return.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as tpmd-client
+  participant D as tpmd daemon
+  participant S as OS credential store
+
+  C->>D: HELLO with key ResumeOrCreate K
+  D->>S: can you answer?
+  S-->>D: no, the store is locked
+  D-->>C: CLOSED store_locked, socket stays open
+  Note over C,D: a state, not a failure, and nothing was created or lost
+  C->>D: REQUEST AWAIT
+  Note over D: parked, and one watcher serves every waiter
+  S-->>D: the user unlocks the keychain, a bus signal arrives
+  D-->>C: RESPONSE OPENED
+  C->>D: HELLO re-issued, the same request
+  D-->>C: WELCOME key Resumed K
+```
+
+The other half of the same rule: a store that is *gone* is refused rather than
+waited on, and the refusal says so.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as tpmd-client
+  participant D as tpmd daemon
+  participant S as OS credential store
+
+  C->>D: HELLO with key ResumeOrCreate K
+  D->>S: can you answer?
+  S-->>D: no, the TPM device node is gone
+  Note over D: not closed but gone, and nothing in this session can change that
+  D-->>C: REJECT backend_unavailable, then close
+  Note over C,D: no wait is offered, and the client is told this needs an administrator
+```
+
+Three invariants follow, and they are what keep "wait for the store" from
+becoming "hang for ever":
+
+1. Only a **closed** store is waitable; a gone one is refused, immediately.
+2. Every wait ends: in `OPENED`, or in `backend_unavailable` if the store turned
+   out to be gone while waiting.
+3. The daemon never offers a wait it cannot honour — if the existence probe says
+   the dependency is gone, there is no wait to enter.
+
+What bounds patience is the **caller's** business, deliberately: the protocol
+promises no window, the daemon holds a parked connection for as long as the
+session lasts (the socket dies with it), and a client that will not block simply
+closes the socket — which the daemon treats as giving up, holding nothing for it.
+
+`STATUS` and `Capabilities` report the store, so a client can tell "is it
+running?" from "can it sign right now?" without attempting an operation:
+
+```
+StoreState = Open | Closed(Closed)
+```
 
 ## 10. Signing contract (the part that must be exact)
 
@@ -497,6 +634,10 @@ Hardware > Sealed > Keyring > File
   default `sealed` floor now fails against `keyring` rather than against `file` —
   unless the host's store cannot be reached, in which case the backend reports
   itself unusable and selection falls through to `dummy`.
+- A store that is merely **closed** is still a *candidate*: a locked keychain is
+  not a reason to fall to a plainer store, and doing so would be a silent custody
+  change. The ladder therefore skips only a backend whose dependency is **gone**
+  (§9.1), and reports it with the reason.
 - The demo and tests opt in at `file`, proving both the refusal and the
   consented path.
 - The daemon reports the *achieved* level truthfully in `WELCOME`, `status`,

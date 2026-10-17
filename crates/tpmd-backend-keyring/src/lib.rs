@@ -42,12 +42,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use keyring_core::{CredentialStore, Error as KeyringError};
+use keyring_core::CredentialStore;
 use p256::ecdsa::SigningKey;
 use p256::ecdsa::signature::Signer as _;
 use p256::elliptic_curve::sec1::ToSec1Point as _;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
-use tpmd_backend::{Backend, BackendError, Owner};
+use tpmd_backend::{Backend, BackendError, Owner, StoreStatus, UnlockHints};
 use tpmd_proto::{Algorithm, KeyId, KeyInfo, SecurityLevel, Signature};
 use tpmd_store::entities::keyring_keys;
 use tpmd_store::map_db_error;
@@ -72,20 +72,37 @@ const ALGORITHMS: &[Algorithm] = &[Algorithm::EcdsaP256Sha256];
 /// nested store call, because a `std::sync::Mutex` does not re-enter.
 static STORE_LOCK: Mutex<()> = Mutex::new(());
 
-/// Whether this backend can reach its store.
+/// Whether this backend can reach its store, and what that means for waiting.
 ///
-/// Probed once, at open time, because the question is blocking and the answer
-/// cannot improve mid-run: a daemon started without a session bus will not grow
-/// one.
-enum Access {
-    /// The store answered a probe; operations may proceed.
-    Ready(&'static CredentialStore),
-    /// The store could not be reached. Every operation reports `store_locked`,
-    /// which is what a host with no session bus, no reachable keychain or no
-    /// loaded profile should see — and it is also why forcing this backend with
-    /// `--backend keyring` still produces a useful answer instead of a
-    /// selection error.
-    Unavailable(String),
+/// A **cached observation, not a one-time verdict**. WVR-151 assumed the answer
+/// could not change mid-run ("a daemon started without a session bus will not
+/// grow one") and that was half right: the bus will not appear, but a *locked*
+/// keychain or collection is something the user unlocks all the time, and a store
+/// that was open shuts when the screen locks. So the state is re-checked by
+/// [`KeyringBackend::probe_store`], and the distinction that matters is who can
+/// change it — the user ([`StoreStatus::Closed`]) or nobody
+/// ([`StoreStatus::Gone`]).
+#[derive(Clone)]
+struct Access {
+    /// The built store, once we have managed to build one.
+    store: Option<&'static CredentialStore>,
+    /// What we last observed, which is what callers are told.
+    status: StoreStatus,
+}
+
+impl Access {
+    /// What a client sees when the store is not open.
+    fn error(&self) -> BackendError {
+        match &self.status {
+            StoreStatus::Open => {
+                BackendError::Internal("asked for the error of an open store".to_owned())
+            }
+            // A locked store is a *retryable* condition: the user can change it.
+            StoreStatus::Closed(reason) => BackendError::StoreLocked(reason.clone()),
+            // A gone dependency is not: nothing in this process brings it back.
+            StoreStatus::Gone(reason) => BackendError::Unavailable(reason.clone()),
+        }
+    }
 }
 
 /// Keep a store alive for the rest of the process.
@@ -111,23 +128,31 @@ fn keep_alive(store: Arc<CredentialStore>) -> &'static CredentialStore {
 pub struct KeyringBackend {
     db: DatabaseConnection,
     db_path: PathBuf,
-    access: Access,
+    /// The store's last observed state. Behind a mutex because a *probe*, which
+    /// takes `&self`, has to be able to record what it saw.
+    access: Mutex<Access>,
 }
 
 impl KeyringBackend {
-    /// Open the backend, probing the platform credential store.
+    /// Open the backend: build the platform credential store and observe it.
     ///
-    /// Succeeds even when the store is unreachable: the backend then exists and
-    /// answers `store_locked`, rather than failing to construct. Refusing here
-    /// instead would collapse "this host has no keyring" into "this build has
-    /// no keyring backend", which are very different things to a user.
+    /// Succeeds even when the store will not answer — the backend then exists and
+    /// reports *why* (`Closed` for a locked store, `Gone` for a missing one)
+    /// rather than failing to construct. Refusing here would collapse "this host's
+    /// store is shut" into "this build has no keyring backend", which are very
+    /// different things to a user, and the first is a state a client may wait out.
     pub async fn open(state_dir: &Path) -> Result<Self, BackendError> {
         let db = tpmd_store::open(state_dir).await?;
-        let access = open_store().await;
+        let access = on_store_thread(|| Ok(observe_store()))
+            .await
+            .unwrap_or_else(|error| Access {
+                store: None,
+                status: StoreStatus::Gone(error.to_string()),
+            });
         Ok(Self {
             db,
             db_path: tpmd_store::database_path(state_dir),
-            access,
+            access: Mutex::new(access),
         })
     }
 
@@ -136,11 +161,20 @@ impl KeyringBackend {
         &self.db_path
     }
 
-    /// The store, or the reason there is none.
+    /// The cached observation.
+    fn access(&self) -> Access {
+        self.access
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// The store, or the error its observed state implies.
     fn store(&self) -> Result<&'static CredentialStore, BackendError> {
-        match &self.access {
-            Access::Ready(store) => Ok(*store),
-            Access::Unavailable(why) => Err(BackendError::StoreLocked(why.clone())),
+        let access = self.access();
+        match access.store {
+            Some(store) if access.status.is_open() => Ok(store),
+            _ => Err(access.error()),
         }
     }
 }
@@ -179,30 +213,41 @@ where
         .map_err(|_| BackendError::Internal("the credential store thread went away".into()))?
 }
 
-/// Build the platform store and ask it whether it can answer.
-async fn open_store() -> Access {
-    match on_store_thread(probe_store).await {
-        Ok(store) => Access::Ready(store),
-        Err(error) => Access::Unavailable(error.to_string()),
+/// Observe the store from scratch: build the platform store, then ask it whether
+/// it will answer.
+///
+/// **Blocking** — this is the store thread's work.
+fn observe_store() -> Access {
+    match store::platform_store() {
+        Err(status) => Access {
+            store: None,
+            status,
+        },
+        Ok(built) => {
+            // Built, so the handle is worth keeping: a later probe can ask it
+            // again instead of paying for another bus connection. It is kept for
+            // the life of the process, so it is never dropped on a thread whose
+            // `Drop` would panic.
+            let store = keep_alive(built);
+            Access {
+                store: Some(store),
+                status: store::probe_status(store),
+            }
+        }
     }
 }
 
-/// The store, or the reason it cannot serve.
+/// Observe again, reusing the handle when we already have one.
 ///
-/// A store that cannot be **built** and a store that will not **answer** are
-/// both `store_locked` here: from the caller's point of view the storage that
-/// holds the keys is not reachable right now, which is the class the protocol
-/// reserves for exactly this and which a retry may clear.
-fn probe_store() -> Result<&'static CredentialStore, BackendError> {
-    match store::platform_store() {
-        Err(error) => Err(error),
-        // A store that answered is kept for the life of the process, so it is
-        // never dropped on a thread whose `Drop` would panic.
-        Ok(store) if store::probe(store.as_ref()) => Ok(keep_alive(store)),
-        Ok(_) => Err(BackendError::StoreLocked(format!(
-            "the {} store does not answer on this host",
-            store::mechanism()
-        ))),
+/// **Blocking** — this is the store thread's work.
+fn observe_access(current: &Access) -> Access {
+    match current.store {
+        Some(store) => Access {
+            store: Some(store),
+            status: store::probe_status(store),
+        },
+        // We never got a handle, so the only way to find out is to try again.
+        None => observe_store(),
     }
 }
 
@@ -217,100 +262,63 @@ where
 
 /// Build the entry for `key_name` in the credential store.
 ///
-/// `modifiers` are applied when the entry is created; reading and deleting ignore
-/// them, so those paths pass an empty slice. Creation goes through
-/// [`write_secret`], which walks the platform's list of attempts.
-fn entry_for(
-    store: &CredentialStore,
-    key_name: &str,
-    modifiers: &[(&str, &str)],
-) -> Result<keyring_core::Entry, BackendError> {
-    build_entry(store, key_name, modifiers)
-}
-
-/// Ask the store for an entry with `modifiers`, falling back to asking without
-/// them when the store does not take any.
+/// `modifiers` are applied when the entry is created; reading and deleting pass
+/// an empty slice, because persistence is a question only creating has to answer.
 ///
-/// The fallback is not a convenience: the mock store the unit tests run against
-/// rejects every modifier, and a future platform store may implement none, and
-/// neither should make the backend unusable over a modifier that exists only to
-/// pin down Windows persistence.
-fn build_entry(
+/// A store that refuses the modifiers is **not** quietly asked again without
+/// them. The modifiers say what custody the key is getting, so a refusal is a
+/// failure, not a hint to try something weaker.
+fn entry_for(
     store: &CredentialStore,
     key_name: &str,
     modifiers: &[(&str, &str)],
 ) -> Result<keyring_core::Entry, BackendError> {
     let map: HashMap<&str, &str> = modifiers.iter().copied().collect();
     let borrowed = (!map.is_empty()).then_some(&map);
-    let build = |modifiers| store.build(store::SERVICE, key_name, modifiers);
-    match build(borrowed) {
-        Err(KeyringError::NotSupportedByStore(_)) if borrowed.is_some() => build(None),
-        result => result,
-    }
-    .map_err(|error| error::map_store_error("opening the credential", error))
+    store
+        .build(store::SERVICE, key_name, borrowed)
+        .map_err(|error| error::map_store_error("opening the credential", error))
 }
 
-/// Whether a refused write is worth trying again with weaker persistence.
+/// Write `secret` to `key_name`, at the custody [`store::entry_modifiers`] asks
+/// for and at no other.
 ///
-/// Only the "the store would not take it" classes: a key name that is too long,
-/// a corrupt store, or a store that cannot answer at all will not do any better
-/// on the second attempt, and retrying those would only double the latency
-/// before the same failure.
-fn worth_weakening(error: &BackendError) -> bool {
-    matches!(
-        error,
-        BackendError::StoreLocked(_) | BackendError::Unavailable(_)
-    )
-}
-
-/// Write `secret` to `key_name`, trying each persistence attempt in order.
-///
-/// Creation is the only operation that has a persistence to choose, which is why
-/// the retry lives here rather than in [`entry_for`]. Weakening is logged, never
-/// silent: the difference between the attempts is whether the key outlives the
-/// logon session, and that is the user's business.
+/// There is deliberately **no fallback**. How long a device key lives is the one
+/// custody question this backend has to answer, so answering it differently from
+/// the way it was asked — because the first answer was inconvenient — would
+/// weaken exactly the guarantee the `keyring` level makes, and it would do so
+/// where nobody is looking: the caller would be handed a key that evaporates at
+/// logoff, the device would come back as a stranger needing re-pairing, and a
+/// line in a background service's log would be the only trace. A store that will
+/// not hold the key durably fails here, and the caller is told.
 async fn write_secret(
     store: &'static CredentialStore,
     key_name: String,
     secret: String,
-    attempts: Vec<Vec<(&'static str, &'static str)>>,
 ) -> Result<(), BackendError> {
-    let last = attempts.len();
-    for (index, modifiers) in attempts.into_iter().enumerate() {
-        let outcome = with_store(store, {
-            let key_name = key_name.clone();
-            let secret = secret.clone();
-            move |store| {
-                let mut secret = secret;
-                let result = entry_for(store, &key_name, &modifiers)?
-                    .set_password(&secret)
-                    .map_err(|error| error::map_store_error("writing the credential", error));
-                secret.zeroize();
-                result
-            }
-        })
-        .await;
-
-        match outcome {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                let is_last = index + 1 == last;
-                if is_last || !worth_weakening(&error) {
-                    return Err(error);
-                }
-                warn!(
-                    backend = "keyring",
-                    attempt = index + 1,
-                    of = last,
-                    rejected = %error,
-                    "credential store refused this persistence; retrying weaker"
-                );
-            }
+    let modifiers = store::entry_modifiers();
+    let context = store::write_context();
+    with_store(store, move |store| {
+        let mut secret = secret;
+        let written = entry_for(store, &key_name, modifiers).and_then(|entry| {
+            entry
+                .set_password(&secret)
+                .map_err(|error| error::map_store_error(context, error))
+        });
+        // The scalar was on this thread only for the duration of the write.
+        secret.zeroize();
+        if let Err(error) = &written {
+            // Logged *and* returned: the caller has to handle it, and an operator
+            // reading the daemon's log should not have to infer it.
+            warn!(
+                backend = "keyring",
+                reason = %error,
+                "the credential store refused to hold the key"
+            );
         }
-    }
-    Err(BackendError::Internal(
-        "no credential persistence attempts were configured".into(),
-    ))
+        written
+    })
+    .await
 }
 
 /// Read the stored scalar for `key_name`, as the hex text it was written as.
@@ -362,13 +370,54 @@ impl Backend for KeyringBackend {
         LEVELS
     }
 
-    /// True only where the store answered at open time.
+    /// True only where the store is open *now*.
     ///
-    /// Selection therefore skips this backend on a host with no reachable
-    /// store and falls to the next rung, rather than serving a backend whose
-    /// every operation would fail.
+    /// Note this is "usable now", not "a candidate": a **closed** store is still a
+    /// candidate for selection, because a locked keychain is a state the user can
+    /// change and the daemon answers it with the non-fatal `closed` reply. The
+    /// selection ladder asks [`Backend::store_status`] for that distinction; this
+    /// method stays the narrow question of whether an operation would succeed
+    /// right now.
     fn can_be_used(&self) -> bool {
-        matches!(self.access, Access::Ready(_))
+        self.access().status.is_open()
+    }
+
+    /// What the store is doing right now, from the last observation.
+    fn store_status(&self) -> StoreStatus {
+        self.access().status
+    }
+
+    /// Ask the store again, and remember the answer.
+    ///
+    /// This is what a parked client is waiting on: read-only, cheap, and safe to
+    /// call whenever there is reason to think something changed. It runs on a
+    /// store thread because asking is blocking — on Linux it may reconnect to the
+    /// session bus if we never managed to build the store at all.
+    async fn probe_store(&self) -> StoreStatus {
+        let current = self.access();
+        let for_thread = current.clone();
+        let observed = on_store_thread(move || Ok(observe_access(&for_thread)))
+            .await
+            .unwrap_or_else(|error| Access {
+                store: current.store,
+                status: StoreStatus::Gone(error.to_string()),
+            });
+        let status = observed.status.clone();
+        *self
+            .access
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = observed;
+        status
+    }
+
+    /// How to find out that this host's store has opened.
+    ///
+    /// Linux's Secret Service gets a real event — a collection unlocking, or the
+    /// service reappearing on the bus — while the platforms with nothing to
+    /// subscribe to get an interval. Either way it is only a *hint*: the daemon
+    /// probes the store after every one.
+    fn unlock_hints(&self) -> Option<Arc<dyn UnlockHints>> {
+        Some(store::unlock_hints())
     }
 
     /// The store this build talks to, for `tpmd status` and the logs.
@@ -412,17 +461,10 @@ impl Backend for KeyringBackend {
         // some desktops ship (KDE Wallet) is UTF-8 only, so an arbitrary binary
         // secret cannot be written through it. Hex is ASCII, so it survives
         // every store.
-        let mut encoded = hex::encode(secret);
+        let encoded = hex::encode(secret);
         secret.zeroize();
 
-        write_secret(
-            store,
-            key_name.clone(),
-            encoded.clone(),
-            store::entry_modifier_attempts(),
-        )
-        .await?;
-        encoded.zeroize();
+        write_secret(store, key_name.clone(), encoded).await?;
 
         let (principal, namespace, id) = row_id(owner, &key_id);
         let row = keyring_keys::ActiveModel {
@@ -604,8 +646,11 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use keyring_core::Error as KeyringError;
+    use keyring_core::api::CredentialStoreApi;
     use p256::ecdsa::VerifyingKey;
     use p256::ecdsa::signature::Verifier as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn owner(principal: &str, namespace: &str) -> Owner {
         Owner::new(tpmd_backend::Principal(principal.into()), namespace)
@@ -618,7 +663,35 @@ mod tests {
         KeyringBackend {
             db,
             db_path: tpmd_store::database_path(dir),
-            access: Access::Ready(store),
+            access: Mutex::new(Access {
+                store: Some(store),
+                status: StoreStatus::Open,
+            }),
+        }
+    }
+
+    impl KeyringBackend {
+        /// The error each store-touching operation gives, for a backend whose
+        /// store cannot serve.
+        async fn every_operation_error(&self, key_id: &KeyId) -> Vec<BackendError> {
+            vec![
+                self.provision(
+                    &owner("uid:1000", "app"),
+                    Algorithm::EcdsaP256Sha256,
+                    SecurityLevel::Keyring,
+                )
+                .await
+                .unwrap_err(),
+                self.identify(&owner("uid:1000", "app"), key_id)
+                    .await
+                    .unwrap_err(),
+                self.sign(&owner("uid:1000", "app"), key_id, b"x")
+                    .await
+                    .unwrap_err(),
+                self.destroy(&owner("uid:1000", "app"), key_id)
+                    .await
+                    .unwrap_err(),
+            ]
         }
     }
 
@@ -634,8 +707,75 @@ mod tests {
 
     /// The backend keeps stores for the life of the process (see
     /// [`keep_alive`]), so the mock is handed over the same way.
+    ///
+    /// It is wrapped in [`ModifierFreeStore`] because Windows legitimately asks
+    /// for a persistence modifier and the mock rejects every modifier by design:
+    /// without the wrapper, the unit tests would fail on Windows over a *store
+    /// capability* rather than over the code under test.
     fn mock_store() -> &'static CredentialStore {
-        keep_alive(keyring_core::mock::Store::new().unwrap())
+        let store: Arc<CredentialStore> =
+            Arc::new(ModifierFreeStore(keyring_core::mock::Store::new().unwrap()));
+        keep_alive(store)
+    }
+
+    /// The in-crate mock store, minus modifiers.
+    ///
+    /// This fakes a store *capability*, never a custody: the mock has no
+    /// persistence concept to choose from, so dropping the modifier cannot hide a
+    /// weakened key. The platform paths keep their modifiers.
+    struct ModifierFreeStore(Arc<keyring_core::mock::Store>);
+
+    impl CredentialStoreApi for ModifierFreeStore {
+        fn vendor(&self) -> String {
+            self.0.vendor()
+        }
+        fn id(&self) -> String {
+            self.0.id()
+        }
+        fn build(
+            &self,
+            service: &str,
+            user: &str,
+            _modifiers: Option<&HashMap<&str, &str>>,
+        ) -> keyring_core::Result<keyring_core::Entry> {
+            self.0.build(service, user, None)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// A store that refuses every write, counting the asks.
+    ///
+    /// Counted, not merely refused: it stands in for the Windows logon session
+    /// that answers a durable write with `ERROR_NO_SUCH_LOGON_SESSION`, and a
+    /// fallback to weaker persistence would ask it a second time — which is what
+    /// [`a_refused_write_fails_rather_than_weakening_quietly`] catches.
+    struct RefusingStore {
+        asks: Arc<AtomicUsize>,
+    }
+
+    impl CredentialStoreApi for RefusingStore {
+        fn vendor(&self) -> String {
+            "refusing".into()
+        }
+        fn id(&self) -> String {
+            "refusing".into()
+        }
+        fn build(
+            &self,
+            _service: &str,
+            _user: &str,
+            _modifiers: Option<&HashMap<&str, &str>>,
+        ) -> keyring_core::Result<keyring_core::Entry> {
+            self.asks.fetch_add(1, Ordering::Relaxed);
+            Err(KeyringError::PlatformFailure(Box::from(
+                "Windows ERROR_NO_SUCH_LOGON_SESSION",
+            )))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     async fn provisioned(backend: &KeyringBackend) -> KeyInfo {
@@ -801,46 +941,50 @@ mod tests {
         ));
     }
 
-    /// A store that cannot answer must say so on every operation — this is the
-    /// shape a host with no session bus, a locked keychain or no loaded profile
-    /// produces, including under `--backend keyring`.
+    /// A store whose state the daemon cannot improve must say so on every
+    /// operation, and it must say *which* state: `store_locked` for a store the
+    /// user can unlock, `unavailable` for a dependency that is never coming back.
+    /// Neither is ever "key missing", and neither silently returns a signature.
     #[tokio::test]
-    async fn an_unreachable_store_reports_store_locked_everywhere() {
+    async fn a_store_that_cannot_serve_reports_its_own_class_everywhere() {
         let dir = tempfile::tempdir().unwrap();
         let db = tpmd_store::open(dir.path()).await.unwrap();
-        let backend = KeyringBackend {
-            db,
-            db_path: tpmd_store::database_path(dir.path()),
-            access: Access::Unavailable("no session bus".into()),
-        };
-        assert!(!backend.can_be_used());
-
         let key_id = KeyId::P256([7; 33]);
-        for error in [
-            backend
-                .provision(
-                    &owner("uid:1000", "app"),
-                    Algorithm::EcdsaP256Sha256,
-                    SecurityLevel::Keyring,
-                )
-                .await
-                .unwrap_err(),
-            backend
-                .identify(&owner("uid:1000", "app"), &key_id)
-                .await
-                .unwrap_err(),
-            backend
-                .sign(&owner("uid:1000", "app"), &key_id, b"x")
-                .await
-                .unwrap_err(),
-            backend
-                .destroy(&owner("uid:1000", "app"), &key_id)
-                .await
-                .unwrap_err(),
-        ] {
+
+        // Locked: the user can change this, so it is `StoreLocked`.
+        let closed = KeyringBackend {
+            db: db.clone(),
+            db_path: tpmd_store::database_path(dir.path()),
+            access: Mutex::new(Access {
+                store: None,
+                status: StoreStatus::Closed("the keychain is locked".into()),
+            }),
+        };
+        assert!(!closed.can_be_used());
+        assert!(closed.store_status().is_waitable());
+        for error in closed.every_operation_error(&key_id).await {
             assert!(
                 matches!(error, BackendError::StoreLocked(_)),
-                "expected store_locked, got {error}"
+                "a locked store is retryable, so store_locked: {error}"
+            );
+        }
+
+        // Gone: no session bus, no device, nothing the user does inside this
+        // session changes it, so it is `Unavailable` — and *not* waitable.
+        let gone = KeyringBackend {
+            db,
+            db_path: tpmd_store::database_path(dir.path()),
+            access: Mutex::new(Access {
+                store: None,
+                status: StoreStatus::Gone("no session bus".into()),
+            }),
+        };
+        assert!(!gone.can_be_used());
+        assert!(!gone.store_status().is_waitable());
+        for error in gone.every_operation_error(&key_id).await {
+            assert!(
+                matches!(error, BackendError::Unavailable(_)),
+                "a gone dependency is not retryable: {error}"
             );
         }
     }
@@ -898,79 +1042,110 @@ mod tests {
     #[test]
     fn the_probe_accepts_a_store_that_answers() {
         let store = mock_store();
-        assert!(store::probe(store));
+        assert!(matches!(store::probe_status(store), StoreStatus::Open));
     }
 
-    /// A store that refuses modifiers must still yield a usable entry: the unit
-    /// tests' mock store rejects every one, and a platform store may implement
-    /// none.
+    /// A store that refuses a modifier must **fail**, not be quietly asked again
+    /// without it: the modifier says what custody the key is getting.
     #[test]
-    fn a_store_that_refuses_modifiers_still_yields_a_usable_entry() {
-        let store = mock_store();
-        let entry = build_entry(store, "modifier-probe", &[("persistence", "Local")])
-            .expect("a refused modifier must not be fatal");
-        entry.set_password("x").unwrap();
-        assert_eq!(entry.get_password().unwrap(), "x");
+    fn a_refused_modifier_is_a_failure_not_a_hint_to_weaken() {
+        let raw = keyring_core::mock::Store::new().unwrap();
+        let store: &CredentialStore = &*raw;
+        let error = entry_for(store, "modifier-probe", &[("persistence", "Local")]).unwrap_err();
+        assert!(
+            matches!(error, BackendError::Unavailable(_)),
+            "a refused modifier must fail loudly, got {error}"
+        );
     }
 
-    /// Only Windows has a persistence to pin; everywhere else every entry is
-    /// created with no modifiers at all.
+    /// Only Windows pins persistence, and it pins exactly one thing: the key is
+    /// per-machine, because a device identity must not roam.
     #[test]
-    fn only_windows_grades_persistence() {
-        let attempts = store::entry_modifier_attempts();
+    fn only_windows_pins_persistence() {
+        let modifiers = store::entry_modifiers();
         if cfg!(target_os = "windows") {
-            assert_eq!(attempts.len(), 2, "Windows tries durable, then session");
             assert_eq!(
-                attempts[0],
+                modifiers.to_vec(),
                 vec![("persistence", "Local")],
-                "the durable attempt comes first: a device identity must not roam"
+                "durable, non-roaming persistence is the only custody asked for"
             );
-            assert_eq!(attempts[1], vec![("persistence", "Session")]);
+            assert!(store::write_context().contains("local persistence"));
         } else {
-            assert_eq!(attempts, vec![Vec::new()], "one attempt, no modifiers");
+            assert!(modifiers.is_empty(), "no other store takes modifiers");
+            assert_eq!(store::write_context(), "writing the credential");
         }
     }
 
-    /// A store that refuses the durable write must be asked again more weakly,
-    /// and the key must still end up stored. This is the Windows path — a logon
-    /// session with no profile-backed credential manager answers a durable write
-    /// with `ERROR_NO_SUCH_LOGON_SESSION` but accepts a session one — exercised
-    /// here against the mock store, which can be told to fail once.
+    /// The refusal a Windows logon session with no profile-backed credential
+    /// manager gives must reach the caller, and must **not** be followed by a
+    /// second, weaker attempt. If that fallback comes back, the store here is
+    /// asked twice and this fails.
     #[tokio::test]
-    async fn a_refused_durable_write_falls_back_to_a_weaker_one() {
-        use keyring_core::Error as KeyringError;
+    async fn a_refused_write_fails_rather_than_weakening_quietly() {
+        let asks = Arc::new(AtomicUsize::new(0));
+        let store: Arc<CredentialStore> = Arc::new(RefusingStore {
+            asks: Arc::clone(&asks),
+        });
+        let (_dir, backend) = over(keep_alive(store)).await;
 
-        let store = mock_store();
-        let key_name = "persistence-fallback-probe";
-        let entry = build_entry(store, key_name, &[]).unwrap();
-        let mock: &keyring_core::mock::Cred = entry.as_any().downcast_ref().unwrap();
-
-        // The first write is refused the way Windows refuses it.
-        mock.set_error(KeyringError::PlatformFailure(Box::from(
-            "Windows ERROR_NO_SUCH_LOGON_SESSION",
-        )));
-
-        let attempts = vec![
-            vec![("persistence", "Local")],
-            vec![("persistence", "Session")],
-        ];
-        write_secret(store, key_name.to_owned(), "deadbeef".to_owned(), attempts)
+        let error = backend
+            .provision(
+                &owner("uid:1000", "app"),
+                Algorithm::EcdsaP256Sha256,
+                SecurityLevel::Keyring,
+            )
             .await
-            .expect("the weaker attempt must succeed");
+            .unwrap_err();
 
-        // And it really landed.
-        let written = entry.get_password().unwrap();
-        assert_eq!(written, "deadbeef");
+        assert!(
+            matches!(error, BackendError::StoreLocked(_)),
+            "a refused write must be store_locked, got {error}"
+        );
+        assert!(
+            error.to_string().contains("NO_SUCH_LOGON_SESSION"),
+            "the store's own reason must survive: {error}"
+        );
+        assert_eq!(
+            asks.load(Ordering::Relaxed),
+            1,
+            "a refused write must not be retried at a weaker custody"
+        );
+        assert!(
+            keyring_keys::Entity::find()
+                .all(&backend.db)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a refused key must not be recorded"
+        );
     }
 
-    /// Weakening is for "the store would not take it", not for failures that
-    /// will fail identically the second time.
+    /// What a refusal *means* is the whole basis for parking a client or not, and
+    /// the answer is per-platform because the remedies are: a locked keychain is
+    /// something the user can unlock, while Windows' refused-durable-write is a
+    /// logon-session property that nothing in this process changes.
     #[test]
-    fn only_store_refusals_are_worth_weakening_for() {
-        assert!(worth_weakening(&BackendError::StoreLocked("locked".into())));
-        assert!(worth_weakening(&BackendError::Unavailable("no".into())));
-        assert!(!worth_weakening(&BackendError::UnknownKey));
-        assert!(!worth_weakening(&BackendError::KeyLoss("gone".into())));
-        assert!(!worth_weakening(&BackendError::Internal("bad".into())));
+    fn a_refusal_is_waitable_except_where_a_logon_would_be_needed() {
+        let status = store::refusal_status("Windows ERROR_NO_SUCH_LOGON_SESSION");
+        if cfg!(target_os = "windows") {
+            assert!(
+                !status.is_waitable(),
+                "no user action changes this: {status:?}"
+            );
+            assert!(matches!(status, StoreStatus::Gone(_)));
+        } else {
+            assert!(status.is_waitable(), "the user can unlock this: {status:?}");
+            assert!(matches!(status, StoreStatus::Closed(_)));
+        }
+    }
+
+    /// A store that cannot even be built is gone, never merely closed: "no
+    /// session bus" is not something the user unlocks.
+    #[test]
+    fn a_store_that_cannot_be_built_is_gone() {
+        let status = store::unreachable_status(KeyringError::PlatformFailure(Box::from("no bus")));
+        assert!(matches!(status, StoreStatus::Gone(_)));
+        assert!(!status.is_waitable());
+        assert!(status.reason().unwrap().contains("no bus"));
     }
 }
