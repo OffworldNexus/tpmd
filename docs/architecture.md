@@ -236,7 +236,7 @@ into a build that has none.
 | Aspect | Behaviour |
 | --- | --- |
 | Addressing | The OS store is a flat `(service, user)` namespace, so the whole `(principal, namespace, key_id)` triple is folded into the *user* half, length-prefixed so a namespace containing the delimiter cannot shift the boundaries. Bounded well under the 513 characters Windows allows. |
-| Persistence | The scalar lives in the OS store as **hex text** — the Secret Service implementation some desktops ship (KDE Wallet) is UTF-8 only, so a binary secret cannot be written through it. The shared SQLite file holds only metadata and the entry address (`keyring_keys`); no scalar is ever written there. On Windows the credential is asked for with **local** (per-machine, non-roaming) persistence rather than the store's `Enterprise` default, because a device identity must not roam; if the logon session refuses durable persistence outright — as a Task Scheduler- or service-started process does, with `ERROR_NO_SUCH_LOGON_SESSION` — the write is retried once at **session** persistence and the downgrade is logged, so custody is never weakened silently and the backend is never unusable over a persistence the host cannot provide. |
+| Persistence | The scalar lives in the OS store as **hex text** — the Secret Service implementation some desktops ship (KDE Wallet) is UTF-8 only, so a binary secret cannot be written through it. The shared SQLite file holds only metadata and the entry address (`keyring_keys`); no scalar is ever written there. On Windows the credential is asked for with **local** (per-machine, non-roaming) persistence rather than the store's `Enterprise` default, because a device identity must not roam; if the logon session refuses durable persistence outright — as a Task Scheduler- or service-started process does, with `ERROR_NO_SUCH_LOGON_SESSION` — provisioning **fails** with `store_locked` naming what was asked for. It is deliberately not retried at session persistence: that would hand the caller a key that dies at logoff, which is a custody change nobody agreed to and which a background service's log would never surface. |
 | Ownership | The `keyring_keys` row is resolved **before** the store is touched, so a foreign key and a non-existent key are the same answer and the store never learns that someone asked about a key that is not theirs. |
 | Usability probe | Once, at open: the store is built and asked a single read-only question. A store that answers "no such credential" is usable — that is the normal state before a key exists. A store that is merely *locked* is also usable, because `store_locked` is its own protocol class and dropping to a weaker store instead would silently weaken custody. |
 | Selection | A store that cannot answer makes the backend unusable, so the ladder passes over it (to the dummy) and records why. `--backend keyring` is still honoured there, so an operator asking "what is wrong with my keyring?" gets `store_locked` rather than a refusal to start. |
@@ -315,10 +315,17 @@ cannot be reached fails rather than silently skipping the tests that need it:
   launchd agent in `gui/501`, because an SSH session lands in the Background
   domain where the login keychain is unreachable — which is also the honest
   statement of the platform constraint, not a testing convenience.
-* **Windows** (the Windows 11 rig's Credential Manager, 99 tests, 0 failures):
-  run in the console session through a scheduled task with an interactive token.
-  Writing a credential from any other kind of session fails (see below), so this
-  is not merely how the rig is driven — it is the shape the agent will run in.
+* **Windows** (the Windows 11 rig's Credential Manager): the store answers, but
+  that session **refuses durable persistence** (`ERROR_NO_SUCH_LOGON_SESSION` for
+  both `Local` and `Enterprise`; only session-scoped `Session` is accepted), so
+  provisioning now **fails by design** there — `store_locked`, naming the
+  persistence asked for — and three of the five store-gated tests fail with that
+  message while the two that never write pass. That is the honest outcome, not a
+  regression: this host cannot hold a device identity at `keyring`, and saying so
+  is the point. The happy path on Windows is therefore **unverified** pending a
+  start-up that gives the agent a logon session it can write durably into
+  (WVR-149), and WVR-152 is what will let a *temporarily* closed store be waited
+  out rather than failed on.
 * Keys are scoped to the authenticated principal on every platform: another
   principal addressing a known fingerprint gets `unknown_key` on `describe`,
   `sign` and `destroy`.
@@ -332,8 +339,12 @@ credential manager — `ERROR_NO_SUCH_LOGON_SESSION` for both `Local` and
 `Enterprise` — while `Session` persistence succeeds. The first Windows run failed
 every write and passed every read, which is what pointed at persistence rather
 than at the store being unreachable; `cmdkey` "working" was a red herring, since
-it writes session-persistable credentials. That is why creation now grades
-persistence (durable first, session as a logged fallback) instead of pinning one.
+it writes session-persistable credentials. Creation asks for **local** persistence
+and **fails** if it is refused: it is deliberately *not* retried at session
+persistence, because that would hand the caller a key that dies at logoff — a
+custody change nobody agreed to, surfaced only in a background service's log —
+and the device would return after the next logon as a stranger needing re-pairing.
+A unit test pins that: the refusing store is asked exactly once.
 
 **Measured beyond the happy path, on macOS.** With the store pointed at an
 isolated *unlocked* keychain (the user-domain default, which is what the store

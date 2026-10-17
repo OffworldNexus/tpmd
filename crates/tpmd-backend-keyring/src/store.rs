@@ -34,36 +34,45 @@ pub(crate) const SERVICE: &str = "tpmd";
 /// lock anything.
 const PROBE_USER: &str = "tpmd.probe";
 
-/// Store-specific modifiers to try when *creating* an entry, strongest custody
-/// first. Every attempt is made in order until one is accepted.
+/// Store-specific modifiers for creating an entry, where the platform needs any.
 ///
-/// Windows needs them. Its Credential Manager defaults to **Enterprise**
+/// Windows needs one. Its Credential Manager defaults to **Enterprise**
 /// persistence, which roams with a roaming profile — and a device identity must
-/// not roam, because it identifies *this* machine. So the first attempt pins
-/// **Local** (per-machine, non-roaming).
+/// not roam, because it identifies *this* machine. So the one thing this backend
+/// asks for is **Local** persistence: per-machine, non-roaming.
 ///
-/// That attempt can be refused outright, though: a logon session with no
-/// profile-backed credential manager — which is what a process started by Task
-/// Scheduler or a service has, and therefore what the Windows agent itself will
-/// have — answers `ERROR_NO_SUCH_LOGON_SESSION` to any durable persistence.
-/// The second attempt therefore asks for **Session**, which such a session does
-/// accept. That is weaker custody (the key lives as long as the logon rather than
-/// the machine), so the caller logs which one was taken; it is never silent.
+/// What happens when a host will not grant it is deliberately *not* handled by
+/// asking for something weaker. A logon session with no profile-backed credential
+/// manager — a Task Scheduler- or service-started process, which is how the
+/// Windows agent runs — answers `ERROR_NO_SUCH_LOGON_SESSION` to durable
+/// persistence, and taking `Session` instead would silently change the promise
+/// the `keyring` level makes: the key would evaporate at logoff and the device
+/// would come back as a stranger, needing re-pairing, with nothing but a log line
+/// to explain it. So the refusal is reported to the caller as `store_locked` and
+/// the operator fixes *how the agent is started*.
 ///
-/// The Secret Service and Apple stores take no modifiers, and the in-crate mock
-/// store rejects them, which is why an entry built with them is asked for
-/// without.
-pub(crate) fn entry_modifier_attempts() -> Vec<Vec<(&'static str, &'static str)>> {
+/// The Secret Service and Apple stores take no modifiers.
+pub(crate) const fn entry_modifiers() -> &'static [(&'static str, &'static str)] {
     #[cfg(target_os = "windows")]
     {
-        vec![
-            vec![("persistence", "Local")],
-            vec![("persistence", "Session")],
-        ]
+        &[("persistence", "Local")]
     }
     #[cfg(not(target_os = "windows"))]
     {
-        vec![Vec::new()]
+        &[]
+    }
+}
+
+/// What the write context calls the custody being asked for, so a refusal names
+/// it and an operator can search the reason rather than guess at it.
+pub(crate) const fn write_context() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "writing the credential with local persistence"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "writing the credential"
     }
 }
 

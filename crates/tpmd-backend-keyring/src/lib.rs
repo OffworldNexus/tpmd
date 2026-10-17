@@ -42,7 +42,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use keyring_core::{CredentialStore, Error as KeyringError};
+use keyring_core::CredentialStore;
 use p256::ecdsa::SigningKey;
 use p256::ecdsa::signature::Signer as _;
 use p256::elliptic_curve::sec1::ToSec1Point as _;
@@ -217,100 +217,65 @@ where
 
 /// Build the entry for `key_name` in the credential store.
 ///
-/// `modifiers` are applied when the entry is created; reading and deleting ignore
-/// them, so those paths pass an empty slice. Creation goes through
-/// [`write_secret`], which walks the platform's list of attempts.
-fn entry_for(
-    store: &CredentialStore,
-    key_name: &str,
-    modifiers: &[(&str, &str)],
-) -> Result<keyring_core::Entry, BackendError> {
-    build_entry(store, key_name, modifiers)
-}
-
-/// Ask the store for an entry with `modifiers`, falling back to asking without
-/// them when the store does not take any.
+/// `modifiers` are applied when the entry is created; reading and deleting pass
+/// an empty slice, because persistence is a question only creating has to answer.
 ///
-/// The fallback is not a convenience: the mock store the unit tests run against
-/// rejects every modifier, and a future platform store may implement none, and
-/// neither should make the backend unusable over a modifier that exists only to
-/// pin down Windows persistence.
-fn build_entry(
+/// A store that refuses the modifiers is **not** quietly asked again without
+/// them. The modifiers say what custody the key is getting, so a refusal is a
+/// failure, not a hint to try something weaker.
+fn entry_for(
     store: &CredentialStore,
     key_name: &str,
     modifiers: &[(&str, &str)],
 ) -> Result<keyring_core::Entry, BackendError> {
     let map: HashMap<&str, &str> = modifiers.iter().copied().collect();
     let borrowed = (!map.is_empty()).then_some(&map);
-    let build = |modifiers| store.build(store::SERVICE, key_name, modifiers);
-    match build(borrowed) {
-        Err(KeyringError::NotSupportedByStore(_)) if borrowed.is_some() => build(None),
-        result => result,
-    }
-    .map_err(|error| error::map_store_error("opening the credential", error))
+    store
+        .build(store::SERVICE, key_name, borrowed)
+        .map_err(|error| error::map_store_error("opening the credential", error))
 }
 
-/// Whether a refused write is worth trying again with weaker persistence.
+/// Write `secret` to `key_name`, at the custody [`store::entry_modifiers`] asks
+/// for and at no other.
 ///
-/// Only the "the store would not take it" classes: a key name that is too long,
-/// a corrupt store, or a store that cannot answer at all will not do any better
-/// on the second attempt, and retrying those would only double the latency
-/// before the same failure.
-fn worth_weakening(error: &BackendError) -> bool {
-    matches!(
-        error,
-        BackendError::StoreLocked(_) | BackendError::Unavailable(_)
-    )
-}
-
-/// Write `secret` to `key_name`, trying each persistence attempt in order.
-///
-/// Creation is the only operation that has a persistence to choose, which is why
-/// the retry lives here rather than in [`entry_for`]. Weakening is logged, never
-/// silent: the difference between the attempts is whether the key outlives the
-/// logon session, and that is the user's business.
+/// There is deliberately **no fallback**. How long a device key lives is the one
+/// custody question this backend has to answer, so answering it differently from
+/// the way it was asked — because the first answer was inconvenient — would
+/// weaken exactly the guarantee the `keyring` level makes. Worse, it would do so
+/// where nobody is looking: the caller would be handed a key that evaporates at
+/// logoff and the device would come back as a stranger needing re-pairing, with a
+/// line in a background service's log as the only trace. A store that will not
+/// hold the key durably therefore **fails**, here, and the caller is told
+/// (`store_locked`, naming what was asked for). The operator's fix is to change
+/// how the agent is started, not to accept a weaker key.
 async fn write_secret(
     store: &'static CredentialStore,
     key_name: String,
     secret: String,
-    attempts: Vec<Vec<(&'static str, &'static str)>>,
 ) -> Result<(), BackendError> {
-    let last = attempts.len();
-    for (index, modifiers) in attempts.into_iter().enumerate() {
-        let outcome = with_store(store, {
-            let key_name = key_name.clone();
-            let secret = secret.clone();
-            move |store| {
-                let mut secret = secret;
-                let result = entry_for(store, &key_name, &modifiers)?
-                    .set_password(&secret)
-                    .map_err(|error| error::map_store_error("writing the credential", error));
-                secret.zeroize();
-                result
-            }
-        })
-        .await;
-
-        match outcome {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                let is_last = index + 1 == last;
-                if is_last || !worth_weakening(&error) {
-                    return Err(error);
-                }
-                warn!(
-                    backend = "keyring",
-                    attempt = index + 1,
-                    of = last,
-                    rejected = %error,
-                    "credential store refused this persistence; retrying weaker"
-                );
-            }
+    let modifiers = store::entry_modifiers();
+    let context = store::write_context();
+    with_store(store, move |store| {
+        let mut secret = secret;
+        let written = entry_for(store, &key_name, modifiers).and_then(|entry| {
+            entry
+                .set_password(&secret)
+                .map_err(|error| error::map_store_error(context, error))
+        });
+        // The scalar was on this thread only for the duration of the write.
+        secret.zeroize();
+        if let Err(error) = &written {
+            // Logged as well as returned: the caller must handle it, and an
+            // operator reading the daemon's log should not have to infer it.
+            warn!(
+                backend = "keyring",
+                reason = %error,
+                "the credential store refused to hold the key"
+            );
         }
-    }
-    Err(BackendError::Internal(
-        "no credential persistence attempts were configured".into(),
-    ))
+        written
+    })
+    .await
 }
 
 /// Read the stored scalar for `key_name`, as the hex text it was written as.
@@ -412,17 +377,10 @@ impl Backend for KeyringBackend {
         // some desktops ship (KDE Wallet) is UTF-8 only, so an arbitrary binary
         // secret cannot be written through it. Hex is ASCII, so it survives
         // every store.
-        let mut encoded = hex::encode(secret);
+        let encoded = hex::encode(secret);
         secret.zeroize();
 
-        write_secret(
-            store,
-            key_name.clone(),
-            encoded.clone(),
-            store::entry_modifier_attempts(),
-        )
-        .await?;
-        encoded.zeroize();
+        write_secret(store, key_name.clone(), encoded).await?;
 
         let (principal, namespace, id) = row_id(owner, &key_id);
         let row = keyring_keys::ActiveModel {
@@ -604,8 +562,11 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use keyring_core::Error as KeyringError;
+    use keyring_core::api::CredentialStoreApi;
     use p256::ecdsa::VerifyingKey;
     use p256::ecdsa::signature::Verifier as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn owner(principal: &str, namespace: &str) -> Owner {
         Owner::new(tpmd_backend::Principal(principal.into()), namespace)
@@ -632,10 +593,75 @@ mod tests {
         over(mock_store()).await
     }
 
+    /// The in-crate mock store, minus modifiers.
+    ///
+    /// The mock rejects every modifier by design, and Windows legitimately asks
+    /// for one, so on Windows the unit tests would otherwise fail over a *store
+    /// capability* rather than over the code under test. Dropping the modifier
+    /// here fakes that capability. It never picks a custody: the mock has no
+    /// persistence concept to pick from.
+    struct ModifierFreeStore(Arc<keyring_core::mock::Store>);
+
+    impl CredentialStoreApi for ModifierFreeStore {
+        fn vendor(&self) -> String {
+            self.0.vendor()
+        }
+        fn id(&self) -> String {
+            self.0.id()
+        }
+        fn build(
+            &self,
+            service: &str,
+            user: &str,
+            _modifiers: Option<&HashMap<&str, &str>>,
+        ) -> keyring_core::Result<keyring_core::Entry> {
+            self.0.build(service, user, None)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// A store that refuses every write, counting the asks.
+    ///
+    /// Counted, not merely refused: if the backend ever went back to quietly
+    /// retrying a refused write at a weaker persistence — the behaviour a Windows
+    /// logon session with no profile-backed credential manager used to force — it
+    /// would ask a second time, and that second ask is what this catches.
+    struct RefusingStore {
+        asks: Arc<AtomicUsize>,
+    }
+
+    impl CredentialStoreApi for RefusingStore {
+        fn vendor(&self) -> String {
+            "refusing".into()
+        }
+        fn id(&self) -> String {
+            "refusing".into()
+        }
+        fn build(
+            &self,
+            _service: &str,
+            _user: &str,
+            _modifiers: Option<&HashMap<&str, &str>>,
+        ) -> keyring_core::Result<keyring_core::Entry> {
+            self.asks.fetch_add(1, Ordering::Relaxed);
+            // The refusal Windows gives for durable persistence.
+            Err(KeyringError::PlatformFailure(Box::from(
+                "Windows ERROR_NO_SUCH_LOGON_SESSION",
+            )))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
     /// The backend keeps stores for the life of the process (see
     /// [`keep_alive`]), so the mock is handed over the same way.
     fn mock_store() -> &'static CredentialStore {
-        keep_alive(keyring_core::mock::Store::new().unwrap())
+        let store: Arc<CredentialStore> =
+            Arc::new(ModifierFreeStore(keyring_core::mock::Store::new().unwrap()));
+        keep_alive(store)
     }
 
     async fn provisioned(backend: &KeyringBackend) -> KeyInfo {
@@ -901,76 +927,80 @@ mod tests {
         assert!(store::probe(store));
     }
 
-    /// A store that refuses modifiers must still yield a usable entry: the unit
-    /// tests' mock store rejects every one, and a platform store may implement
-    /// none.
+    /// A store that refuses the modifiers we ask for must **fail** rather than be
+    /// asked again without them: the modifiers say what custody the key is
+    /// getting, so a refusal is a failure, not a hint to try something weaker.
     #[test]
-    fn a_store_that_refuses_modifiers_still_yields_a_usable_entry() {
-        let store = mock_store();
-        let entry = build_entry(store, "modifier-probe", &[("persistence", "Local")])
-            .expect("a refused modifier must not be fatal");
-        entry.set_password("x").unwrap();
-        assert_eq!(entry.get_password().unwrap(), "x");
+    fn a_refused_modifier_is_a_failure_not_a_hint_to_weaken() {
+        let raw = keyring_core::mock::Store::new().unwrap();
+        let store: &CredentialStore = &*raw;
+        let error = entry_for(store, "modifier-probe", &[("persistence", "Local")]).unwrap_err();
+        assert!(
+            matches!(error, BackendError::Unavailable(_)),
+            "a refused modifier must fail loudly, got {error}"
+        );
     }
 
-    /// Only Windows has a persistence to pin; everywhere else every entry is
-    /// created with no modifiers at all.
+    /// Only Windows has a persistence to pin, and it pins exactly one thing: the
+    /// key is per-machine, because a device identity must not roam.
     #[test]
-    fn only_windows_grades_persistence() {
-        let attempts = store::entry_modifier_attempts();
+    fn only_windows_pins_persistence() {
+        let modifiers = store::entry_modifiers();
         if cfg!(target_os = "windows") {
-            assert_eq!(attempts.len(), 2, "Windows tries durable, then session");
             assert_eq!(
-                attempts[0],
+                modifiers.to_vec(),
                 vec![("persistence", "Local")],
-                "the durable attempt comes first: a device identity must not roam"
+                "durable, non-roaming persistence is the only custody asked for"
             );
-            assert_eq!(attempts[1], vec![("persistence", "Session")]);
+            assert!(store::write_context().contains("local persistence"));
         } else {
-            assert_eq!(attempts, vec![Vec::new()], "one attempt, no modifiers");
+            assert!(modifiers.is_empty(), "no other store takes modifiers");
+            assert_eq!(store::write_context(), "writing the credential");
         }
     }
 
-    /// A store that refuses the durable write must be asked again more weakly,
-    /// and the key must still end up stored. This is the Windows path — a logon
-    /// session with no profile-backed credential manager answers a durable write
-    /// with `ERROR_NO_SUCH_LOGON_SESSION` but accepts a session one — exercised
-    /// here against the mock store, which can be told to fail once.
+    /// The refusal a Windows logon session with no profile-backed credential
+    /// manager gives must reach the caller, and must **not** be followed by a
+    /// second, weaker attempt. If someone reintroduces that fallback, the store
+    /// here would be asked twice and this test fails.
     #[tokio::test]
-    async fn a_refused_durable_write_falls_back_to_a_weaker_one() {
-        use keyring_core::Error as KeyringError;
+    async fn a_refused_write_fails_rather_than_weakening_quietly() {
+        let asks = Arc::new(AtomicUsize::new(0));
+        let store: Arc<CredentialStore> = Arc::new(RefusingStore {
+            asks: Arc::clone(&asks),
+        });
+        let (_dir, backend) = over(keep_alive(store)).await;
 
-        let store = mock_store();
-        let key_name = "persistence-fallback-probe";
-        let entry = build_entry(store, key_name, &[]).unwrap();
-        let mock: &keyring_core::mock::Cred = entry.as_any().downcast_ref().unwrap();
-
-        // The first write is refused the way Windows refuses it.
-        mock.set_error(KeyringError::PlatformFailure(Box::from(
-            "Windows ERROR_NO_SUCH_LOGON_SESSION",
-        )));
-
-        let attempts = vec![
-            vec![("persistence", "Local")],
-            vec![("persistence", "Session")],
-        ];
-        write_secret(store, key_name.to_owned(), "deadbeef".to_owned(), attempts)
+        let error = backend
+            .provision(
+                &owner("uid:1000", "app"),
+                Algorithm::EcdsaP256Sha256,
+                SecurityLevel::Keyring,
+            )
             .await
-            .expect("the weaker attempt must succeed");
+            .unwrap_err();
 
-        // And it really landed.
-        let written = entry.get_password().unwrap();
-        assert_eq!(written, "deadbeef");
-    }
-
-    /// Weakening is for "the store would not take it", not for failures that
-    /// will fail identically the second time.
-    #[test]
-    fn only_store_refusals_are_worth_weakening_for() {
-        assert!(worth_weakening(&BackendError::StoreLocked("locked".into())));
-        assert!(worth_weakening(&BackendError::Unavailable("no".into())));
-        assert!(!worth_weakening(&BackendError::UnknownKey));
-        assert!(!worth_weakening(&BackendError::KeyLoss("gone".into())));
-        assert!(!worth_weakening(&BackendError::Internal("bad".into())));
+        assert!(
+            matches!(error, BackendError::StoreLocked(_)),
+            "a refused write must be store_locked, got {error}"
+        );
+        assert!(
+            error.to_string().contains("NO_SUCH_LOGON_SESSION"),
+            "the store's own reason must survive: {error}"
+        );
+        assert_eq!(
+            asks.load(Ordering::Relaxed),
+            1,
+            "a refused write must not be retried at a weaker custody"
+        );
+        // And the refusal left nothing behind: no half-written key on record.
+        assert!(
+            keyring_keys::Entity::find()
+                .all(&backend.db)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a refused key must not be recorded"
+        );
     }
 }
