@@ -40,7 +40,6 @@ the daemon, so it is worth understanding before changing anything; see
 | Path | What it is |
 | --- | --- |
 | `/usr/bin/tpmd` | the agent |
-| `/usr/bin/tpmd-demo` | toy consumer, for walking the life cycle by hand |
 | `/usr/lib/systemd/system/tpmd.socket` | the listening socket |
 | `/usr/lib/systemd/system/tpmd.service` | the agent |
 | `/etc/default/tpmd` | configuration, read by the service |
@@ -147,15 +146,17 @@ sudo rm -rf /var/lib/tpmd
 
 ## Checking an install by hand
 
-`tpmd-demo` ships for exactly this. The demo resolves the *per-user* endpoint by
-default, so against the system agent the socket has to be named:
+The package ships the agent and nothing else — the commands below are all it
+takes:
 
 ```sh
-sudo tpmd-demo --socket /run/tpmd/tpmd.sock probe
-sudo tpmd-demo --socket /run/tpmd/tpmd.sock provision
-sudo tpmd-demo --socket /run/tpmd/tpmd.sock sign <fingerprint> 'hello'
-sudo tpmd-demo --socket /run/tpmd/tpmd.sock status
+tpmd status              # listening, which backend, which level, store state
+tpmd backend show        # what this machine chose and why
 ```
+
+`tpmd-demo`, the toy consumer that walks a whole key life cycle, is a
+development tool: it is built from the source tree and documented in
+`docs/demo.md`, and it is deliberately not part of the package.
 
 ## Nightly and release versions
 

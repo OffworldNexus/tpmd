@@ -127,15 +127,10 @@ for image in $images; do
 			sleep 0.1
 		done
 		tpmd status --socket /tmp/verify.sock
-		tpmd-demo --socket /tmp/verify.sock probe
-		# The fingerprint is asked for by shape rather than by position, so a
-		# cosmetic change in the toy cannot make the steps below pass vacuously.
-		out=$(tpmd-demo --socket /tmp/verify.sock provision)
-		printf '%s\n' "$out"
-		key=$(printf '%s\n' "$out" | grep -oE '[0-9a-f]{66}' | tail -1)
-		[ -n "$key" ] || { echo "no fingerprint in the provision output" >&2; exit 1; }
-		tpmd-demo --socket /tmp/verify.sock describe "$key"
-		tpmd-demo --socket /tmp/verify.sock sign "$key" "installation smoke"
+		# No key operations here. The toy consumer that used to walk them is a
+		# development tool and is deliberately not distributed, while the key
+		# handling itself is covered by the workspace test suite; what this check
+		# is for is that the package installs and runs on this release.
 		kill "$pid"
 		wait "$pid" 2>/dev/null || true
 

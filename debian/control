@@ -31,5 +31,5 @@ Description: local key agent that signs on behalf of local applications
  .
  This package installs the system-wide agent: a socket-activated service that
  serves every local user and authorises each caller from kernel peer
- credentials. A per-user agent can also be run by hand, and the tpmd-demo tool
- shipped here exercises an installed agent end to end.
+ credentials. A per-user agent can also be run by hand; the toy consumer used
+ for end-to-end checks is built from the source tree rather than shipped.
