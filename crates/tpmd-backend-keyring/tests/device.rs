@@ -237,11 +237,16 @@ async fn the_backend_names_the_store_it_uses() {
 /// **Experiment**: does the bus actually wake us, or are we only ever saved by
 /// the safety net?
 ///
-/// Writing a credential changes the default collection, which should show up as a
-/// signal on the bus. The bound here is *below* the safety net, so passing means
-/// a real signal arrived. Failing does not mean the provider is broken — it means
-/// this store does not announce writes, and the unlock case is the one to verify
-/// on a machine where the collection can be locked and unlocked.
+/// Writing a credential changes the default collection, which the bus announces.
+/// The bound here is *below* the safety net, so passing means a real signal
+/// arrived — and it fails if the subscription ever goes deaf, which is what this
+/// test is for. **Linux only**: elsewhere the hint provider *is* an interval, so
+/// the assertion would hold for the wrong reason (the interval is shorter than
+/// the bound), and `a_hint_always_arrives` covers that case honestly.
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+))]
 #[tokio::test]
 async fn the_bus_wakes_us_for_a_real_change() {
     let Some((_dir, backend)) = usable_backend().await else {
