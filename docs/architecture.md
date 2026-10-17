@@ -365,10 +365,19 @@ cannot be reached fails rather than silently skipping the tests that need it:
   launchd agent in `gui/501`, because an SSH session lands in the Background
   domain where the login keychain is unreachable — which is also the honest
   statement of the platform constraint, not a testing convenience.
-* **Windows** (the Windows 11 rig's Credential Manager, 99 tests, 0 failures):
-  run in the console session through a scheduled task with an interactive token.
-  Writing a credential from any other kind of session fails (see below), so this
-  is not merely how the rig is driven — it is the shape the agent will run in.
+* **Windows** — two hosts, two answers, which is exactly the distinction the
+  closed/gone split exists for:
+  * **GitHub's `windows-latest` runner accepts** durable `local` persistence, so
+    the store-gated suite passes there in full — including
+    `a_keyring_key_signs_verifies_and_survives_a_restart` — with the strict path
+    that refuses to weaken persistence.
+  * **the Windows 11 rig's console session does not.** Driven through a scheduled
+    task with an interactive token, it answers `ERROR_NO_SUCH_LOGON_SESSION` to
+    any durable persistence, so the write-path tests **fail by design** there
+    while the read-only ones pass. That is a property of the logon session, not a
+    defect in the backend: it is why the refusal is classified *gone* rather than
+    *closed* (WVR-152), and the fix belongs to how the agent is started
+    (WVR-149).
 * Keys are scoped to the authenticated principal on every platform: another
   principal addressing a known fingerprint gets `unknown_key` on `describe`,
   `sign` and `destroy`.
@@ -403,8 +412,10 @@ tests under `TPMD_TEST_KEYRING=require` instead of skipping them.
 
 **Still owed:** the *login* keychain left locked (the measurement above locked an
 isolated keychain instead, because restoring the login one needs its password),
-the equivalent locked-collection run on Linux, and a Windows run from a service-
-or logon-started agent rather than a scheduled task.
+the equivalent locked-collection run on Linux, and a Windows run from the rig's
+*logon-started* agent rather than a scheduled task — CI's service-spawned session
+already accepts durable writes, so what is left is the interactive case on a real
+machine, which belongs with WVR-149.
 
 ## Out of scope
 
