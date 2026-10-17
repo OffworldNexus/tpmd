@@ -40,3 +40,10 @@ packaging/build/
 *.deb
 *.buildinfo
 *.changes
+
+# A build run directly in the checkout leaves these behind — debhelper's own
+# working files. The container build writes them into the tree, so ignore the
+# patterns rather than trusting the next `git add -A`.
+/debian/*.debhelper
+/debian/*.substvars
+/debian/*-build-stamp
