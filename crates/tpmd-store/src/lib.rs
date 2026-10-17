@@ -30,6 +30,7 @@ use tpmd_ipc::secure_fs;
 
 pub mod entities;
 pub mod migration;
+pub mod settings;
 
 /// File name of the single SQLite database inside the state directory.
 pub const DATABASE_FILE_NAME: &str = "keys.sqlite";

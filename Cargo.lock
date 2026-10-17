@@ -3245,6 +3245,9 @@ dependencies = [
  "async-trait",
  "clap",
  "p256",
+ "postcard",
+ "sea-orm",
+ "serde",
  "tempfile",
  "thiserror",
  "tokio",
@@ -3256,6 +3259,7 @@ dependencies = [
  "tpmd-client",
  "tpmd-ipc",
  "tpmd-proto",
+ "tpmd-store",
  "tracing",
  "tracing-subscriber",
 ]

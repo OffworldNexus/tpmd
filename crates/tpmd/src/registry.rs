@@ -95,6 +95,17 @@ pub struct Selection {
     pub skipped: Vec<(&'static str, String)>,
 }
 
+impl Selection {
+    /// What was passed over, owned — for a record that outlives this selection.
+    #[must_use]
+    pub fn skipped_owned(&self) -> Vec<(String, String)> {
+        self.skipped
+            .iter()
+            .map(|(name, reason)| ((*name).to_owned(), reason.clone()))
+            .collect()
+    }
+}
+
 impl core::fmt::Debug for Selection {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Selection")
@@ -104,67 +115,61 @@ impl core::fmt::Debug for Selection {
     }
 }
 
-/// Choose the backend to serve with.
+/// What every candidate backend is doing, without choosing anything.
 ///
-/// With `forced`, the named backend must be built **and** usable, otherwise a
-/// clear error naming the alternatives is returned — unless the backend asks to
-/// be honoured anyway ([`Backend::forced_when_unusable`]), which a backend that
-/// can explain its own unreachability does. Without `forced`, every factory is
-/// opened, unusable ones are skipped, and the one with the highest
-/// [`Backend::default_level`] wins.
-pub async fn select(
+/// Opens each factory exactly once and reports what it found. The same survey
+/// answers both questions the daemon has — "which backend should this fresh
+/// machine use?" and, when a record already exists, "would anything stronger win
+/// now?" — the second being **information for an administrator, never an
+/// action**.
+pub struct Survey {
+    /// Backends that could serve, strongest first. A backend whose store is
+    /// merely *closed* is a candidate: a locked keychain is not a reason to fall
+    /// to a plainer store, which would be a silent custody change.
+    pub candidates: Vec<Box<dyn Backend>>,
+    /// What was passed over, and why.
+    pub skipped: Vec<(&'static str, String)>,
+}
+
+/// Open one named backend, whether or not it can serve right now.
+///
+/// Used once a machine has chosen: a remembered backend is opened even if its
+/// store is *closed* (the daemon then answers `closed` and a client may wait) or
+/// its dependency is *gone* (the daemon answers `backend_unavailable`). It is
+/// never quietly swapped for something else, because that would change custody —
+/// and could change the identity a caller sees.
+pub async fn open_named(
     factories: &[Box<dyn BackendFactory>],
+    name: &str,
     state_dir: &Path,
-    forced: Option<&str>,
-) -> Result<Selection, SelectionError> {
-    if let Some(name) = forced {
-        let factory = factories.iter().find(|f| f.name() == name).ok_or_else(|| {
-            SelectionError::NotBuilt {
-                name: name.to_owned(),
-                built: built_names(factories),
-            }
+) -> Result<Box<dyn Backend>, SelectionError> {
+    let factory = factories
+        .iter()
+        .find(|factory| factory.name() == name)
+        .ok_or_else(|| SelectionError::NotBuilt {
+            name: name.to_owned(),
+            built: built_names(factories),
         })?;
+    factory
+        .open(state_dir)
+        .await
+        .map_err(|error| SelectionError::Unusable {
+            name: name.to_owned(),
+            reason: error.to_string(),
+        })
+}
 
-        let backend = factory
-            .open(state_dir)
-            .await
-            .map_err(|error| SelectionError::Unusable {
-                name: name.to_owned(),
-                reason: error.to_string(),
-            })?;
-        // Forcing a backend whose store is *closed* is honoured: the caller asked
-        // for it, and every operation will say `store_locked` — which is more
-        // useful than a refusal to start. Forcing one that is *gone* is refused
-        // unless the backend asks to be honoured anyway.
-        let status = backend.store_status();
-        if !status.is_open() && !status.is_waitable() && !backend.forced_when_unusable() {
-            return Err(SelectionError::Unusable {
-                name: name.to_owned(),
-                reason: status
-                    .reason()
-                    .unwrap_or("the backend reports it cannot be used on this host")
-                    .to_owned(),
-            });
-        }
-        return Ok(Selection {
-            backend: Arc::from(backend),
-            skipped: Vec::new(),
-        });
-    }
-
-    let mut usable: Vec<Box<dyn Backend>> = Vec::new();
+/// Look at every built backend and report what it can do.
+pub async fn survey(factories: &[Box<dyn BackendFactory>], state_dir: &Path) -> Survey {
+    let mut candidates: Vec<Box<dyn Backend>> = Vec::new();
     let mut skipped: Vec<(&'static str, String)> = Vec::new();
+
     for factory in factories {
         match factory.open(state_dir).await {
             Ok(backend) => {
                 let status = backend.store_status();
-                // A **closed** store is a candidate, not a skip: a locked keychain
-                // is a state the user changes, and the daemon answers it with the
-                // non-fatal `closed` reply while the client waits. Only a *gone*
-                // dependency is passed over, because nothing brings it back —
-                // serving a weaker store instead would be a silent custody change.
                 if status.is_open() || status.is_waitable() {
-                    usable.push(backend);
+                    candidates.push(backend);
                 } else {
                     skipped.push((
                         factory.name(),
@@ -179,21 +184,117 @@ pub async fn select(
         }
     }
 
-    // Strongest first. The dummy is always present, so this cannot be empty
-    // unless the dummy itself failed to open — which is a real error worth
-    // reporting rather than papering over.
-    usable.sort_by_key(|backend| Reverse(backend.default_level()));
-    let backend = usable
-        .into_iter()
-        .next()
-        .ok_or_else(|| SelectionError::NotBuilt {
-            name: "<any>".to_owned(),
-            built: built_names(factories),
-        })?;
-
-    Ok(Selection {
-        backend: backend.into(),
+    candidates.sort_by_key(|backend| Reverse(backend.default_level()));
+    Survey {
+        candidates,
         skipped,
+    }
+}
+
+impl Survey {
+    /// The backend a fresh machine should use: the strongest candidate, or the
+    /// one an administrator named.
+    ///
+    /// `named` is how `--backend` is honoured on a first start: it restricts the
+    /// ladder rather than bypassing it, so naming a backend that is not built — or
+    /// whose dependency is gone — is refused with the reason, exactly as an
+    /// automatic choice would be.
+    pub fn pick(&mut self, named: Option<&str>) -> Result<Box<dyn Backend>, SelectionError> {
+        let Some(named) = named else {
+            if self.candidates.is_empty() {
+                return Err(SelectionError::NotBuilt {
+                    name: "<any>".to_owned(),
+                    built: built_names_of(self),
+                });
+            }
+            return Ok(self.candidates.remove(0));
+        };
+
+        if let Some(index) = self
+            .candidates
+            .iter()
+            .position(|backend| backend.name() == named)
+        {
+            return Ok(self.candidates.remove(index));
+        }
+
+        match self.skipped.iter().find(|(name, _)| *name == named) {
+            // Built, but it cannot serve here: say why rather than choosing
+            // something else, which is the whole point of naming it.
+            Some((_, reason)) => Err(SelectionError::Unusable {
+                name: named.to_owned(),
+                reason: reason.clone(),
+            }),
+            None => Err(SelectionError::NotBuilt {
+                name: named.to_owned(),
+                built: built_names_of(self),
+            }),
+        }
+    }
+
+    /// The strongest candidate, if any could serve.
+    pub fn strongest(&self) -> Option<&dyn Backend> {
+        self.candidates.first().map(|backend| backend.as_ref())
+    }
+
+    /// What was passed over, owned — for a record that outlives this survey.
+    pub fn skipped_owned(&self) -> Vec<(String, String)> {
+        self.skipped
+            .iter()
+            .map(|(name, reason)| ((*name).to_owned(), reason.clone()))
+            .collect()
+    }
+}
+
+/// The names this survey saw, for an error that should name the alternatives.
+fn built_names_of(survey: &Survey) -> String {
+    let mut names: Vec<&str> = survey
+        .candidates
+        .iter()
+        .map(|backend| backend.name())
+        .collect();
+    names.extend(survey.skipped.iter().map(|(name, _)| *name));
+    names.join(", ")
+}
+
+/// Choose the backend for a machine that has **not** chosen yet.
+///
+/// The ladder: every candidate is surveyed, the strongest wins, and `named` —
+/// which is how `--backend` is honoured on a first start — restricts the choice
+/// to one rung rather than bypassing the survey's reasons.
+///
+/// A named backend whose store is **gone** is refused, unless it asks to be
+/// honoured anyway ([`Backend::forced_when_unusable`]): an operator asking "what
+/// is wrong with my keyring?" should be told `store_locked`, not refused a start.
+pub async fn select(
+    factories: &[Box<dyn BackendFactory>],
+    state_dir: &Path,
+    named: Option<&str>,
+) -> Result<Selection, SelectionError> {
+    let mut survey = survey(factories, state_dir).await;
+    let backend = match survey.pick(named) {
+        Ok(backend) => backend,
+        Err(error) => {
+            // Only a backend the caller *named* may be honoured despite being
+            // unable to serve; an automatic choice has no one to ask.
+            if named.is_none() {
+                return Err(error);
+            }
+            let SelectionError::Unusable { name, .. } = &error else {
+                return Err(error);
+            };
+            let name = name.clone();
+            let opened = open_named(factories, &name, state_dir).await?;
+            if opened.forced_when_unusable() {
+                opened
+            } else {
+                return Err(error);
+            }
+        }
+    };
+    Ok(Selection {
+        backend: Arc::from(backend),
+        skipped: survey.skipped,
     })
 }
 
@@ -463,8 +564,16 @@ mod tests {
     #[tokio::test]
     async fn forcing_a_built_backend_selects_it_even_if_weaker() {
         let selection = select(&factories(), dir(), Some("file")).await.unwrap();
-        assert_eq!(selection.backend.name(), "file");
-        assert!(selection.skipped.is_empty());
+        assert_eq!(
+            selection.backend.name(),
+            "file",
+            "a named backend wins even though a stronger one stands on the ladder"
+        );
+        // `skipped` means "could not serve", not "was not chosen": the backends
+        // the survey could not use are the ones reported here, with their reasons.
+        let skipped: Vec<&str> = selection.skipped.iter().map(|(name, _)| *name).collect();
+        assert!(skipped.contains(&"broken"), "{skipped:?}");
+        assert!(skipped.contains(&"gone"), "{skipped:?}");
     }
 
     #[tokio::test]
@@ -503,6 +612,42 @@ mod tests {
         )];
         let selection = select(&candidates, dir(), Some("closed")).await.unwrap();
         assert_eq!(selection.backend.name(), "closed");
+    }
+
+    /// The survey is what an administrator's "would anything stronger win now?"
+    /// is built on, so its ordering has to be the ladder's own: strongest first,
+    /// with a merely-closed rung still counting.
+    #[tokio::test]
+    async fn the_survey_reports_candidates_strongest_first() {
+        let candidates = vec![
+            fake("file", SecurityLevel::File, open(), true, false),
+            fake(
+                "hardware-but-closed",
+                SecurityLevel::Hardware,
+                StoreStatus::Closed("the device is busy".into()),
+                true,
+                false,
+            ),
+            fake(
+                "hardware-but-gone",
+                SecurityLevel::Hardware,
+                StoreStatus::Gone("no device".into()),
+                true,
+                false,
+            ),
+        ];
+        let survey = survey(&candidates, dir()).await;
+        let strongest = survey.strongest().expect("something can serve");
+        assert_eq!(
+            strongest.name(),
+            "hardware-but-closed",
+            "a closed rung outranks a weaker open one"
+        );
+        assert_eq!(
+            survey.skipped_owned().len(),
+            1,
+            "only the gone one is passed over"
+        );
     }
 
     /// A backend that can explain its own unreachability is honoured when

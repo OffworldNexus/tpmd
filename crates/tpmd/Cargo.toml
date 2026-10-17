@@ -15,6 +15,10 @@ path = "src/main.rs"
 [dependencies]
 tpmd-proto.workspace = true
 tpmd-backend.workspace = true
+# The daemon reads the selection record straight from the shared store, before it
+# has chosen a backend — so it depends on the store itself, not only on backends.
+tpmd-store.workspace = true
+sea-orm.workspace = true
 tpmd-backend-dummy.workspace = true
 # The keyring backend serves all three platforms, so it is built everywhere.
 tpmd-backend-keyring.workspace = true
@@ -26,6 +30,10 @@ tpmd-ipc.workspace = true
 tpmd-client.workspace = true
 async-trait.workspace = true
 clap.workspace = true
+# The backend selection record is `postcard`-encoded — the same vocabulary the
+# wire uses, and the only sane way to store reasons that contain punctuation.
+serde.workspace = true
+postcard.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

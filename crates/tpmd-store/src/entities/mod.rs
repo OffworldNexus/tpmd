@@ -10,4 +10,5 @@
 pub mod cng_keys;
 pub mod keyring_keys;
 pub mod keys;
+pub mod settings;
 pub mod tpm_keys;

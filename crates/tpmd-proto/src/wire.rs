@@ -310,6 +310,34 @@ pub struct Status {
     /// Whether the store can serve right now, so `tpmd status` answers "is it
     /// running, and can it sign?" without attempting an operation.
     pub store: StoreState,
+    /// Which backend this machine chose, and whether anything stronger is
+    /// available — for an administrator to read, never for the daemon to act on.
+    pub selection: BackendSelection,
+}
+
+/// This machine's backend choice, as `status` reports it.
+///
+/// The choice is made once and kept: a store that closes does not make the
+/// daemon fall to a plainer one, because that would silently change custody — and
+/// can change the *identity* a caller sees. So the only thing that ever changes
+/// this is an administrator, deliberately, and `stronger_available` exists to
+/// tell them what they could adopt rather than to do it for them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendSelection {
+    /// The backend serving this connection.
+    pub backend: String,
+    /// When the choice was committed, Unix seconds. `None` while nothing has been
+    /// committed yet — a machine whose store has not served since it was chosen
+    /// records nothing, so a store that merely happened to be locked at startup
+    /// cannot settle the machine on a weaker store.
+    pub chosen_unix: Option<i64>,
+    /// Why it was chosen, in the daemon's words.
+    pub reason: Option<String>,
+    /// A stronger backend the ladder *would* pick now, if one exists.
+    ///
+    /// Reported as information: adopting it re-keys the device, so it is an
+    /// administrator's decision and never an automatic one.
+    pub stronger_available: Option<String>,
 }
 
 /// A failed request.
@@ -530,6 +558,12 @@ mod tests {
                     message: "the keychain is locked".into(),
                     detail: None,
                 }),
+                selection: BackendSelection {
+                    backend: "dummy".into(),
+                    chosen_unix: None,
+                    reason: None,
+                    stronger_available: Some("linux-tpm".into()),
+                },
             })),
         }));
         round_trip(&Message::Request(Request {

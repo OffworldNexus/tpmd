@@ -47,15 +47,49 @@ target-gated dependency). **What is built** is a compile-time property; **what
 is used** is decided at run time:
 
 * the daemon registers every backend built for this OS;
-* each backend answers `can_be_used()` — can it actually work *here*? (the TPM
-  backend opens the device; the dummy always says yes);
-* selection keeps the usable ones and picks the strongest `default_level()`,
-  with the dummy as the guaranteed floor of the ladder;
-* `--backend <NAME>` forces one and is refused with a clear error when it is
-  not built for this platform or not usable on this host.
+* a **survey** opens each of them once and reports what it found: a backend whose
+  store is *open* is a candidate, and so is one whose store is merely *closed*
+  (a locked keychain is a state the user changes — see the closed-store section);
+  only a *gone* dependency is passed over, with its reason;
+* the strongest candidate by `default_level()` is chosen, with the dummy as the
+  guaranteed floor of the ladder;
+* the choice is then **written down and left alone** — see below;
+* on `--backend <NAME>`: on a machine that has not chosen yet the name *restricts*
+  the ladder to that rung, and on a machine that has chosen it must agree with the
+  record — a flag that overrode it would be the automatic change this rules out.
 
 The daemon drives whichever won through one `Arc<dyn Backend>`, so adding a
 backend is a new crate plus a registry entry, not a rewrite.
+
+### The choice is sticky, and only an administrator changes it
+
+The daemon used to re-run the ladder on **every** start, so the store serving a
+device could change without anyone deciding it should — because a keychain
+happened to be locked when the daemon started. That is a custody change, and it
+can be an *identity* change: a different store means a different key, which means
+pairing again.
+
+So the choice is made once and recorded, in the shared store's `settings` table
+(`backend.selection`, a `postcard`-encoded `SelectionRecord`: the backend, when it
+was chosen, why, and what was passed over). It never changes by itself: a store
+that closes produces the non-fatal `closed` answer (WVR-152) and a dependency that
+disappears produces `backend_unavailable` — both on the *remembered* backend.
+`tpmd status` reports the choice, and says when a stronger rung is available now
+**as information**; adopting it re-keys the device, so it is never automatic.
+
+Two subtleties carry the weight:
+
+* **A closed rung is a candidate, never a skip.** Otherwise the first start — at
+  logon, before the user has unlocked anything — would permanently commit a
+  plaintext store as this machine's identity.
+* **The choice is committed on first successful *use*, not at open.** Opening a
+  backend only proves it can be probed; a start that answers liveness probes and
+  nothing else has chosen nothing yet, and `status` says so.
+
+The administrator's verbs live on the CLI: `tpmd backend` shows the record,
+`tpmd backend set <name> --yes` changes it (the flag is required, and the warning
+says re-pairing may follow), and `tpmd backend clear` forgets it, returning the
+next start to the ladder. A running daemon picks a change up at its next start.
 
 ```mermaid
 graph TD
