@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The macOS agent, as launchd should start it: a per-user agent in the Aqua
+  session, which is the only place the login keychain — and so the Secure
+  Enclave — is reachable. An SSH login lives in launchd's Background domain and
+  cannot get there at all, which is a platform fact to document, not to work
+  around.
+
+  This is a *template*: validate-agent.sh fills in the paths and installs it in
+  ~/Library/LaunchAgents. Production installation and registration belong to the
+  packaging ticket.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>nexus.offworld.tpmd</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__TPMD_EXECUTABLE__</string>
+		<string>serve</string>
+		<!-- Pinned rather than defaulted: launchd hands each session its own
+		     $TMPDIR, so a socket derived from it would not be the one a client
+		     in another session is looking for. -->
+		<string>--socket</string>
+		<string>__TPMD_SOCKET__</string>
+		<string>--state-dir</string>
+		<string>__TPMD_STATE_DIR__</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>__TPMD_LOG__</string>
+	<key>StandardErrorPath</key>
+	<string>__TPMD_LOG__</string>
+</dict>
+</plist>

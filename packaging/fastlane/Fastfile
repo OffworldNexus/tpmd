@@ -1,0 +1,51 @@
+# The macOS agent's build lane.
+#
+# One job: turn the workspace into a signed `.app` whose *executable is the
+# daemon*. That is not a packaging nicety — the Secure Enclave entitlement lives
+# on the executable, so a launcher that exec'd a separately signed binary would
+# lose it, and a plain `codesign` of the same entitlement without a provisioning
+# profile is killed at exec by AMFI. The Xcode target exists to keep those two
+# facts true; see `docs/macos.md`.
+#
+# Nothing here runs on the push/PR path: it needs Apple credentials, and the
+# enclave tests self-skip where the bundle is absent.
+
+platform :macos do
+  desc "Build the signed tpmd agent bundle (the daemon must BE the bundle executable)"
+  lane :bundle_agent do
+    # CI has no Xcode session, so it authenticates with an API key; a developer's
+    # signed-in Xcode is enough locally. Either way the certificate and the
+    # profile are managed by Xcode, never checked in.
+    if ENV["ASC_KEY_ID"] && ENV["ASC_ISSUER_ID"] && ENV["ASC_KEY_CONTENT"]
+      app_store_connect_api_key(
+        key_id: ENV["ASC_KEY_ID"],
+        issuer_id: ENV["ASC_ISSUER_ID"],
+        key_content: ENV["ASC_KEY_CONTENT"],
+        is_key_content_base64: true,
+      )
+    end
+
+    team = ENV.fetch("DEVELOPMENT_TEAM") { UI.user_error!("DEVELOPMENT_TEAM is required (see packaging/fastlane/.env.default)") }
+    bundle_id = ENV.fetch("TPMD_BUNDLE_ID", "nexus.offworld.tpmd")
+
+    build_app(
+      project: "packaging/macos/tpmd.xcodeproj",
+      scheme: "tpmd",
+      configuration: ENV.fetch("CONFIGURATION", "Release"),
+      output_directory: ENV.fetch("OUTPUT_DIRECTORY", "packaging/build"),
+      # Sandboxing is off because a sandboxed bundle cannot be exec'd directly
+      # (it deadlocks in `_libsecinit_appsandbox`) and this agent is started by
+      # launchd, not by LaunchServices.
+      xcargs: [
+        "-allowProvisioningUpdates",
+        "-allowProvisioningDeviceRegistration",
+        "DEVELOPMENT_TEAM=#{team}",
+        "PRODUCT_BUNDLE_IDENTIFIER=#{bundle_id}",
+        "ENABLE_APP_SANDBOX=NO",
+      ].join(" "),
+    )
+
+    UI.success("Signed agent bundle in #{ENV.fetch('OUTPUT_DIRECTORY', 'packaging/build')}")
+    UI.message("Run it as a per-user agent: packaging/macos/scripts/validate-agent.sh <path to tpmd.app>")
+  end
+end

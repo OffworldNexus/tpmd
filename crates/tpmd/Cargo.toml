@@ -48,6 +48,10 @@ tpmd-backend-linux-tpm.workspace = true
 [target.'cfg(target_os = "windows")'.dependencies]
 tpmd-backend-windows-cng.workspace = true
 
+# And the Secure Enclave backend only on macOS.
+[target.'cfg(target_os = "macos")'.dependencies]
+tpmd-backend-macos-se.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 tpmd-ipc.workspace = true

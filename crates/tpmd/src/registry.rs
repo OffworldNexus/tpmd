@@ -44,7 +44,7 @@ pub fn builtin_factories() -> Vec<Box<dyn BackendFactory>> {
     // The `mut` is only exercised where a hardware backend exists, i.e. not on
     // macOS or any other platform without one.
     #[cfg_attr(
-        not(any(target_os = "linux", target_os = "windows")),
+        not(any(target_os = "linux", target_os = "windows", target_os = "macos")),
         allow(unused_mut)
     )]
     let mut factories: Vec<Box<dyn BackendFactory>> =
@@ -53,6 +53,8 @@ pub fn builtin_factories() -> Vec<Box<dyn BackendFactory>> {
     factories.push(Box::new(LinuxTpmFactory));
     #[cfg(target_os = "windows")]
     factories.push(Box::new(WindowsCngFactory));
+    #[cfg(target_os = "macos")]
+    factories.push(Box::new(SecureEnclaveFactory));
     factories
 }
 
@@ -349,6 +351,30 @@ impl BackendFactory for LinuxTpmFactory {
     async fn open(&self, state_dir: &Path) -> Result<Box<dyn Backend>, BackendError> {
         Ok(Box::new(
             tpmd_backend_linux_tpm::LinuxTpmBackend::open(state_dir).await?,
+        ))
+    }
+}
+
+/// The macOS Secure Enclave backend: `hardware`, via the login keychain's
+/// enclave-held keys.
+///
+/// Built only on macOS, and — unlike the other hardware backends — only *usable*
+/// from a signed bundle in the Aqua session. The probe in `open()` is what
+/// decides, and it stores a key rather than merely generating one, because
+/// generating succeeds in places where keeping a key is refused.
+#[cfg(target_os = "macos")]
+struct SecureEnclaveFactory;
+
+#[cfg(target_os = "macos")]
+#[async_trait]
+impl BackendFactory for SecureEnclaveFactory {
+    fn name(&self) -> &'static str {
+        "macos-se"
+    }
+
+    async fn open(&self, state_dir: &Path) -> Result<Box<dyn Backend>, BackendError> {
+        Ok(Box::new(
+            tpmd_backend_macos_se::SecureEnclaveBackend::open(state_dir).await?,
         ))
     }
 }

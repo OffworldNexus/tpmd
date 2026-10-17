@@ -1,0 +1,6 @@
+source "https://rubygems.org"
+
+# Pinned so a lane that worked last month still works next month. `bundle
+# install` in this directory is the whole setup a developer needs; CI does the
+# same. The macOS agent's bundle is built by `fastlane bundle_agent`.
+gem "fastlane", "~> 2.225"

@@ -1,0 +1,36 @@
+[package]
+name = "tpmd-backend-macos-se"
+description = "macOS Secure Enclave backend (security level `hardware`) for the tpmd local key agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tpmd-proto.workspace = true
+tpmd-backend.workspace = true
+tpmd-store.workspace = true
+async-trait.workspace = true
+sea-orm.workspace = true
+p256.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
+tracing.workspace = true
+# The one-shot channel the off-runtime helper answers on.
+tokio.workspace = true
+
+# Security.framework and CoreFoundation are OS components; nothing is bundled.
+# Both are reached through safe wrappers, so this backend needs no `unsafe` at
+# all — which is why it is not a third exception to the rule in AGENTS.md.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework.workspace = true
+security-framework-sys.workspace = true
+core-foundation.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true
+p256.workspace = true
+hex.workspace = true

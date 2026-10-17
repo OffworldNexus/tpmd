@@ -12,3 +12,12 @@
 *.sqlite-wal
 *.sqlite-shm
 *.sock
+
+# The macOS agent's signing configuration is deployment-owned: certificates,
+# profiles and account identifiers never live in the repository.
+packaging/fastlane/.env
+packaging/fastlane/report.xml
+packaging/build/
+*.app
+*.p8
+*.mobileprovision
