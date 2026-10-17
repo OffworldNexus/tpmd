@@ -3,8 +3,14 @@
 `tpmd` on macOS runs as a **per-user agent** whose strongest rung is the Secure
 Enclave: P-256 keys that never leave hardware, at security level `hardware`. The
 login keychain provides the `keyring` rung (WVR-151's universal backend). There is
-**no `sealed` rung on macOS** — what one would even be is an open question, and
-WVR-154 owns it; until then a Mac whose enclave is unusable falls to `keyring`,
+**no `sealed` rung on macOS**, and there will not be one: every candidate is either
+already `keyring` (a login-keychain item, portable given the user's password) or
+`hardware` plus a user-presence policy — which is the thing this backend refuses to
+impose, because a prompt on an unattended agent is a hang rather than a security
+win. A level the platform cannot back would be a claim, not a guarantee, and the
+taxonomy exists to stop the daemon making claims it cannot keep (Windows reasons
+the same way from the other side). So a Mac whose enclave is unusable falls to
+`keyring`,
 which is below the default `sealed` floor, so clients are refused unless they
 consent with `allow_below_floor`. That is the intended "never silently weaken"
 behaviour, not a bug.

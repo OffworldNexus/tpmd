@@ -455,9 +455,7 @@ machine, which belongs with WVR-149.
 
 ## Out of scope
 
-The macOS Secure Enclave backend (WVR-142) — see `docs/macos.md` for the three
-platform restrictions that come with it; a macOS `sealed` level (WVR-154);
-packaging and installers
+Packaging and installers
 (WVR-145…150); any real relay (the demo's relay is simulated); `sign_prehash`;
 additional algorithms. The Linux *kernel* keyring is not a store tpmd will ever
 implement: it dies with logout and reboot, so it cannot hold a device identity.
