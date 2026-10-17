@@ -5,11 +5,12 @@ signs on behalf of local applications, so applications never hold or export
 private key material. Applications talk to it over a local IPC channel using
 the `tpmd-client` Rust library.
 
-This workspace builds the first backend — the **dummy** engine, a software
-P-256 store in SQLite — and with it the whole consumer contract: daemon, IPC
-protocol, client library and a toy consumer. It is deliberately the weakest
-rung of the security ladder (it reports level `file`); the hardware and OS
-keyring backends arrive in later tickets behind the same interface.
+This workspace builds four backends behind one interface: the **dummy** engine
+(a software P-256 store in SQLite, level `file`), the **OS credential store**
+(level `keyring`, on every platform), the **Linux TPM** (`sealed` and
+`hardware`) and the **Windows CNG Platform Crypto Provider** (`hardware`). The
+consumer contract — daemon, IPC protocol, client library and a toy consumer — is
+the same for all of them.
 
 - Design and wire protocol: [`docs/protocol.md`](docs/protocol.md)
 - Architecture and custody notes: [`docs/architecture.md`](docs/architecture.md)
@@ -24,6 +25,7 @@ keyring backends arrive in later tickets behind the same interface.
 | `tpmd-backend` | The `Backend` trait (async, object-safe), `SecurityLevel`, `Principal` and the error taxonomy. |
 | `tpmd-store` | SeaORM entities and migrations for the one SQLite file every backend shares. |
 | `tpmd-backend-dummy` | SQLite software P-256 store (level `file`). |
+| `tpmd-backend-keyring` | OS credential store (level `keyring`): Secret Service, login keychain or Credential Manager, one store per OS. |
 | `tpmd-backend-linux-tpm` | Linux TPM 2.0 store (levels `sealed` and `hardware`), hand-rolled transport, no libtss2. |
 | `tpmd-backend-windows-cng` | Windows CNG Platform Crypto Provider store (level `hardware`), all FFI in one module. |
 | `tpmd-ipc` | Cross-platform local endpoint: Unix socket, macOS socket, Windows named pipe, with native caller authentication. |

@@ -352,6 +352,13 @@ Status {
 }
 ```
 
+`backend` is a free-form string. It carries the backend's name, and for a
+backend that talks to a named underlying store it also names that store — e.g.
+`keyring (secret-service)` — so a user can tell *which* store is serving them.
+This is a value change only: the type, the protocol version and the
+`tpmd-client` library are unchanged, and the machine-readable
+`WELCOME.capabilities.backend` keeps the bare backend name (`keyring`).
+
 ### 8.2 `provision` / `HELLO.key = Create`
 
 `ProvisionRequest` mints a key and returns its **`KeyId` = its fingerprint** =
@@ -484,6 +491,12 @@ Hardware > Sealed > Keyring > File
   so on a machine with a usable TPM the default `sealed` floor is met without
   consent. Selection prefers the strongest usable backend, so `hardware` is
   chosen whenever the TPM can create an ECC child.
+- The keyring backend (`keyring`) achieves only **`keyring`**: the scalar lives in
+  the operating system's credential store, but signing is still software.
+  Selection prefers it over the dummy, so on a machine without a usable TPM the
+  default `sealed` floor now fails against `keyring` rather than against `file` —
+  unless the host's store cannot be reached, in which case the backend reports
+  itself unusable and selection falls through to `dummy`.
 - The demo and tests opt in at `file`, proving both the refusal and the
   consented path.
 - The daemon reports the *achieved* level truthfully in `WELCOME`, `status`,

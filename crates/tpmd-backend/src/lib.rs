@@ -134,6 +134,27 @@ pub trait Backend: Send + Sync {
             .expect("every backend offers at least one security level")
     }
 
+    /// The underlying store this backend talks to, where that is a meaningful
+    /// thing to name (e.g. `"secret-service"`, `"login-keychain"`).
+    ///
+    /// Diagnostics only. `tpmd status` renders it beside the backend name so a
+    /// user can tell *which* store is actually serving them, without the wire
+    /// protocol growing a field that only one backend would ever fill.
+    fn store_mechanism(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Whether `--backend <name>` should construct this backend even when it
+    /// reports it cannot be used here.
+    ///
+    /// Normally forcing an unusable backend is refused distinctly, because a
+    /// backend that cannot run has nothing useful to say. A backend that is
+    /// merely *unreachable* is different: it exists, it knows why it cannot
+    /// answer, and saying so is exactly what an operator forcing it wants.
+    fn forced_when_unusable(&self) -> bool {
+        false
+    }
+
     /// Mint a key owned by `owner` at exactly `level`.
     ///
     /// The daemon has already chosen `level` via [`select_level`]; the backend

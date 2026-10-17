@@ -112,7 +112,11 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
     for (name, reason) in &selection.skipped {
         info!(backend = name, reason = %reason, "backend skipped");
     }
-    info!(backend = backend.name(), "backend selected");
+    info!(
+        backend = backend.name(),
+        store = backend.store_mechanism().unwrap_or("-"),
+        "backend selected"
+    );
 
     let mut listener = Listener::bind(config.endpoint.clone(), config.socket_access)
         .await
@@ -261,6 +265,18 @@ fn negotiate_version(client_min: u16, client_max: u16) -> Option<u16> {
     (low <= high).then_some(high)
 }
 
+/// The backend's name for `tpmd status`, naming the underlying store when the
+/// backend has one worth naming (e.g. `keyring (secret-service)`).
+///
+/// `Status.backend` is a free-form string, so this needs no protocol change;
+/// the machine-readable `Capabilities.backend` keeps the bare name.
+fn backend_display_name(backend: &dyn Backend) -> String {
+    match backend.store_mechanism() {
+        Some(mechanism) => format!("{} ({mechanism})", backend.name()),
+        None => backend.name().to_owned(),
+    }
+}
+
 fn capabilities(backend: &dyn Backend) -> Capabilities {
     let algorithms = backend.algorithms().to_vec();
     let (key_id_encoding, signature_encoding) = algorithms
@@ -329,7 +345,7 @@ async fn dispatch(backend: &dyn Backend, session: &Session, op: Op) -> Result<Re
     match op {
         Op::Status => Ok(Reply::Status(Status {
             daemon: DAEMON_VERSION.to_owned(),
-            backend: backend.name().to_owned(),
+            backend: backend_display_name(backend),
             principal: session.owner.principal.to_string(),
             namespace: session.namespace.clone(),
             levels: backend.levels().to_vec(),

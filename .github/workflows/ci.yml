@@ -32,12 +32,32 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # The dummy engine must work on all three target OSes, so every crate is
-      # built and tested on each. Platform backends that arrive later add their
-      # own jobs.
+      # Every backend is built and tested on all three OSes — the dummy and the
+      # keyring backend exist everywhere, the TPM/CNG ones only where their
+      # platform is.
       - name: Build
         run: cargo build --workspace --all-targets
+
+      # The keyring backend's store-gated tests need a real OS credential store
+      # that can be *written* to. This installs one, and the script below runs it
+      # with `TPMD_TEST_KEYRING=require`, so a store that cannot be reached fails
+      # the job instead of silently skipping the very tests that need it.
+      - name: Install a keyring (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gnome-keyring dbus-x11
+
+      - name: Test (Linux, with a keyring)
+        if: runner.os == 'Linux'
+        run: .github/scripts/test-with-keyring.sh
+
+      # macOS and Windows runners are logged-in user sessions that already have
+      # a login keychain / Credential Manager, so they need no setup.
       - name: Test
+        if: runner.os != 'Linux'
+        env:
+          TPMD_TEST_KEYRING: require
         run: cargo test --workspace --all-targets
 
   lint:

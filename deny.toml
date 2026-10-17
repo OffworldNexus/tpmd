@@ -1,4 +1,17 @@
 [advisories]
+# `zvariant`, `zvariant_derive` and `zbus_names` were folded into `zbus` at 6.0
+# and are marked unmaintained as of 2026-10-16 (RUSTSEC-2026-0370 through
+# -0372). The Secret Service credential store reaches them through `zbus` 5,
+# which is what `secret-service` still builds on, so there is no upgrade to take
+# — the advisories say as much themselves ("No safe upgrade is available").
+# None of them is a vulnerability: they are unmaintained notices about crates
+# that were merged into their parent. Remove these ignores as soon as
+# `secret-service` moves to zbus 6, or if that backend is dropped.
+ignore = [
+    "RUSTSEC-2026-0370", # zvariant, unmaintained
+    "RUSTSEC-2026-0371", # zbus_names, unmaintained
+    "RUSTSEC-2026-0372", # zvariant_derive, unmaintained
+]
 
 [licenses]
 allow = [

@@ -5,6 +5,7 @@ members = [
     "crates/tpmd-backend",
     "crates/tpmd-store",
     "crates/tpmd-backend-dummy",
+    "crates/tpmd-backend-keyring",
     "crates/tpmd-backend-linux-tpm",
     "crates/tpmd-backend-windows-cng",
     "crates/tpmd-ipc",
@@ -28,6 +29,7 @@ tpmd-proto = { path = "crates/tpmd-proto", version = "0.1.0" }
 tpmd-backend = { path = "crates/tpmd-backend", version = "0.1.0" }
 tpmd-store = { path = "crates/tpmd-store", version = "0.1.0" }
 tpmd-backend-dummy = { path = "crates/tpmd-backend-dummy", version = "0.1.0" }
+tpmd-backend-keyring = { path = "crates/tpmd-backend-keyring", version = "0.1.0" }
 tpmd-backend-linux-tpm = { path = "crates/tpmd-backend-linux-tpm", version = "0.1.0" }
 tpmd-backend-windows-cng = { path = "crates/tpmd-backend-windows-cng", version = "0.1.0" }
 tpmd-ipc = { path = "crates/tpmd-ipc", version = "0.1.0" }
@@ -77,6 +79,16 @@ zeroize = "1.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 hex = "0.4"
+# OS credential stores. The `keyring` crate itself is deliberately *not* used:
+# at its current major it hard-wires one store per platform and tells
+# applications that choose stores per platform to link `keyring-core` plus the
+# store crates instead — and its Linux arm is the kernel keyring, which dies at
+# logout. `tpmd-backend-keyring` pulls exactly one of the three store crates in,
+# chosen by target OS, so no build contains another platform's store.
+keyring-core = "1.0"
+zbus-secret-service-keyring-store = "1.0"
+apple-native-keyring-store = "1.0"
+windows-native-keyring-store = "1.1"
 tempfile = "3"
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 # Unix peer-credential retrieval (SO_PEERCRED / LOCAL_PEERCRED) and file modes.
