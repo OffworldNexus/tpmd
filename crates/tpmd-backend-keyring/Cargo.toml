@@ -1,0 +1,48 @@
+[package]
+name = "tpmd-backend-keyring"
+description = "OS credential store backend (security level `keyring`) for the tpmd local key agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tpmd-proto.workspace = true
+tpmd-backend.workspace = true
+tpmd-store.workspace = true
+keyring-core.workspace = true
+async-trait.workspace = true
+sea-orm.workspace = true
+p256.workspace = true
+getrandom.workspace = true
+zeroize.workspace = true
+hex.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+# Exactly one platform store is compiled in, chosen by target OS, so a build for
+# one platform never contains another platform's store code.
+#
+# Linux: the Secret Service over the session bus, through zbus (pure Rust).
+# `rt-tokio-crypto-rust` selects the Tokio runtime and the pure-Rust crypto, so
+# no libdbus and therefore no C toolchain is needed. The kernel keyring store
+# (`linux-keyutils-keyring-store`) is deliberately not used: it dies with logout
+# and reboot, which is the storage class this level exists to avoid.
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+zbus-secret-service-keyring-store = { workspace = true, features = ["rt-tokio-crypto-rust"] }
+
+# macOS: the login keychain, through the Security framework (an OS component;
+# nothing is bundled and no C toolchain is required to build).
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+apple-native-keyring-store = { workspace = true, features = ["keychain"] }
+
+# Windows: the Credential Manager, through `windows-sys`.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true
+p256.workspace = true

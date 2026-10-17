@@ -23,6 +23,7 @@ Read, in order:
 | `tpmd-backend` | `Backend` trait (async, object-safe), security levels, error taxonomy, `can_be_used`. |
 | `tpmd-store` | SeaORM entities + migrations for the single shared SQLite file. |
 | `tpmd-backend-dummy` | SQLite P-256 store (level `file`). |
+| `tpmd-backend-keyring` | OS credential store (level `keyring`); one crate, one store per OS. |
 | `tpmd-backend-linux-tpm` | Linux TPM 2.0 store (levels `sealed`, `hardware`); hand-rolled transport. |
 | `tpmd-backend-windows-cng` | Windows CNG Platform Crypto Provider store (level `hardware`); one `unsafe` FFI module. |
 | `tpmd-ipc` | Local endpoints, caller auth, secure filesystem, framed I/O. |
@@ -45,11 +46,14 @@ Read, in order:
 - Backends are one crate per mechanism, gated so a build for one OS never
   compiles another platform's backend; **what is built** is compile-time, **what
   is used** is chosen at run time via `can_be_used()` + `default_level()`, with
-  `--backend` to force one.
+  `--backend` to force one. The keyring backend serves all three platforms, so
+  it is built everywhere and gates the *store* it links instead; a host whose
+  store is unreachable reports `can_be_used() == false` and the ladder passes
+  over it.
 
 ## Testing
 
-- Full suite (fast): `cargo test --workspace --all-targets -q` (~2s warm; sub-second test execution once built, timeout 900000ms).
+- Full suite (fast): `cargo test --workspace --all-targets -q` (~1s warm; sub-second test execution once built, timeout 900000ms).
 - Single crate: `cargo test -p tpmd-proto -q` (~10s, timeout 120000ms).
 - Single test: `cargo test -p tpmd --test daemon <name> -q` (~5s, timeout 120000ms).
 - Static analysis, in order:
@@ -57,11 +61,18 @@ Read, in order:
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo deny check`
 - Cross-compile check of the Windows transport without a C toolchain:
-  `cargo check -p tpmd-ipc --target x86_64-pc-windows-msvc`.
+  `cargo check -p tpmd-ipc --target x86_64-pc-windows-msvc`. The scope is
+  deliberate: anything reaching `tpmd-store` drags in `libsqlite3-sys`'s bundled
+  C build and needs an MSVC (or SDK) C toolchain this host does not have. To
+  type-check a platform-gated *backend* without one, set
+  `LIBSQLITE3_SYS_USE_PKG_CONFIG=1 PKG_CONFIG_ALLOW_CROSS=1` (env only; `cargo
+  check` does not link).
 - Always: redirect output to a temp file; silent on success; dump failures only.
 - CI runs the full suite on `ubuntu-latest`, `windows-latest` and `macos-latest`.
-- Last measured: 2026-10-14, full suite ~2s warm (60 tests, 5 of which
-  self-skip without TPM access; cold includes a full rebuild).
+- Last measured: 2026-10-17, full suite ~1s warm / ~3s when the workspace crates
+  need rebuilding (91 tests; on this machine 6 self-skip — 5 without TPM access,
+  1 without a second OS account — and 5 more would where no OS credential store
+  answers; cold includes a full rebuild).
 
 The cross-user test (`crates/tpmd/tests/cross_user.rs`) needs a second OS
 account — `TPMD_TEST_OTHER_USER` (default `tpmdtest`) — and passwordless
@@ -91,6 +102,14 @@ scheduled task with `/IT`.
 The agent is a silent per-user process on Windows (no window); `tpmd status` is
 the first-class way to ask whether one is running and what it can do.
 
+The keyring tests come in two halves. The unit tests run against an in-crate mock
+store and need nothing. The store-gated tests
+(`crates/tpmd-backend-keyring/tests/device.rs`) run against the **real** OS
+credential store; they **self-skip** where no store answers, which keeps the
+headless runners green. Note that they write a real credential (under namespace
+`tpmd-test`, destroyed again before they return): set `TPMD_TEST_KEYRING=0` to
+skip them where touching the login keyring would prompt.
+
 ## Anti-patterns
 
 - Do not trust a UID/SID claimed in a request payload: always derive it from
@@ -99,3 +118,8 @@ the first-class way to ask whether one is running and what it can do.
   one. `select_level` is the only place that decision is made.
 - Do not add key enumeration: keys are addressed by fingerprint only.
 - Do not export private key material: no such operation exists.
+- Do not call the OS credential store from an async thread. Its blocking API —
+  and its `Drop` — call `block_on` on a runtime of its own, which panics on any
+  thread that already has a runtime context, `spawn_blocking` threads included;
+  `tpmd-backend-keyring` owns the only correct path and nothing else may take a
+  shortcut around it.

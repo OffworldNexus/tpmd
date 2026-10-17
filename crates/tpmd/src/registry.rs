@@ -11,7 +11,9 @@
 //!   keeps the strongest that answers yes.
 //!
 //! The dummy (`file`) backend is always built and always usable, so selection
-//! can never come up empty — it is the floor of the ladder.
+//! can never come up empty — it is the floor of the ladder. The keyring backend
+//! is also always built, but may not be usable, in which case selection passes
+//! over it for the dummy.
 
 use std::cmp::Reverse;
 use std::path::Path;
@@ -36,13 +38,17 @@ pub trait BackendFactory: Send + Sync {
 /// Every backend compiled into this binary for this operating system.
 #[must_use]
 pub fn builtin_factories() -> Vec<Box<dyn BackendFactory>> {
-    // The dummy is unconditional: it is the guaranteed fallback. The `mut` is
-    // only needed where another backend exists, i.e. not on macOS.
+    // Two backends are unconditional: the dummy, because it is the guaranteed
+    // fallback, and the keyring, because it serves every platform (whether it
+    // can actually be used there is a run-time question, not a build-time one).
+    // The `mut` is only exercised where a hardware backend exists, i.e. not on
+    // macOS or any other platform without one.
     #[cfg_attr(
         not(any(target_os = "linux", target_os = "windows")),
         allow(unused_mut)
     )]
-    let mut factories: Vec<Box<dyn BackendFactory>> = vec![Box::new(DummyFactory)];
+    let mut factories: Vec<Box<dyn BackendFactory>> =
+        vec![Box::new(DummyFactory), Box::new(KeyringFactory)];
     #[cfg(target_os = "linux")]
     factories.push(Box::new(LinuxTpmFactory));
     #[cfg(target_os = "windows")]
@@ -101,8 +107,10 @@ impl core::fmt::Debug for Selection {
 /// Choose the backend to serve with.
 ///
 /// With `forced`, the named backend must be built **and** usable, otherwise a
-/// clear error naming the alternatives is returned. Without it, every factory
-/// is opened, unusable ones are skipped, and the one with the highest
+/// clear error naming the alternatives is returned — unless the backend asks to
+/// be honoured anyway ([`Backend::forced_when_unusable`]), which a backend that
+/// can explain its own unreachability does. Without `forced`, every factory is
+/// opened, unusable ones are skipped, and the one with the highest
 /// [`Backend::default_level`] wins.
 pub async fn select(
     factories: &[Box<dyn BackendFactory>],
@@ -124,7 +132,7 @@ pub async fn select(
                 name: name.to_owned(),
                 reason: error.to_string(),
             })?;
-        if !backend.can_be_used() {
+        if !backend.can_be_used() && !backend.forced_when_unusable() {
             return Err(SelectionError::Unusable {
                 name: name.to_owned(),
                 reason: "the backend reports it cannot be used on this host".to_owned(),
@@ -183,6 +191,27 @@ impl BackendFactory for DummyFactory {
     }
 }
 
+/// The universal `keyring`-level backend: the operating system's own credential
+/// store.
+///
+/// Built everywhere, unlike the hardware backends, because all three platforms
+/// have such a store. Whether this host's store is reachable is a run-time
+/// question the backend answers through [`Backend::can_be_used`].
+struct KeyringFactory;
+
+#[async_trait]
+impl BackendFactory for KeyringFactory {
+    fn name(&self) -> &'static str {
+        "keyring"
+    }
+
+    async fn open(&self, state_dir: &Path) -> Result<Box<dyn Backend>, BackendError> {
+        Ok(Box::new(
+            tpmd_backend_keyring::KeyringBackend::open(state_dir).await?,
+        ))
+    }
+}
+
 /// The Linux TPM 2.0 backend: `sealed` and `hardware`.
 #[cfg(target_os = "linux")]
 struct LinuxTpmFactory;
@@ -231,6 +260,7 @@ mod tests {
         name: &'static str,
         level: SecurityLevel,
         usable: bool,
+        forced: bool,
     }
 
     #[async_trait]
@@ -246,6 +276,9 @@ mod tests {
         }
         fn can_be_used(&self) -> bool {
             self.usable
+        }
+        fn forced_when_unusable(&self) -> bool {
+            self.forced
         }
         fn default_level(&self) -> SecurityLevel {
             self.level
@@ -279,6 +312,7 @@ mod tests {
         level: SecurityLevel,
         usable: bool,
         opens: bool,
+        forced: bool,
     }
 
     #[async_trait]
@@ -294,36 +328,35 @@ mod tests {
                 name: self.name,
                 level: self.level,
                 usable: self.usable,
+                forced: self.forced,
             }))
         }
     }
 
+    /// Build a fake backend factory; spelled out once so each test case reads as
+    /// the property it is about.
+    fn fake(
+        name: &'static str,
+        level: SecurityLevel,
+        usable: bool,
+        opens: bool,
+        forced: bool,
+    ) -> Box<dyn BackendFactory> {
+        Box::new(FakeFactory {
+            name,
+            level,
+            usable,
+            opens,
+            forced,
+        })
+    }
+
     fn factories() -> Vec<Box<dyn BackendFactory>> {
         vec![
-            Box::new(FakeFactory {
-                name: "file",
-                level: SecurityLevel::File,
-                usable: true,
-                opens: true,
-            }),
-            Box::new(FakeFactory {
-                name: "hw",
-                level: SecurityLevel::Hardware,
-                usable: true,
-                opens: true,
-            }),
-            Box::new(FakeFactory {
-                name: "broken",
-                level: SecurityLevel::Hardware,
-                usable: true,
-                opens: false,
-            }),
-            Box::new(FakeFactory {
-                name: "unusable",
-                level: SecurityLevel::Hardware,
-                usable: false,
-                opens: true,
-            }),
+            fake("file", SecurityLevel::File, true, true, false),
+            fake("hw", SecurityLevel::Hardware, true, true, false),
+            fake("broken", SecurityLevel::Hardware, true, false, false),
+            fake("unusable", SecurityLevel::Hardware, false, true, false),
         ]
     }
 
@@ -345,18 +378,8 @@ mod tests {
     #[tokio::test]
     async fn a_failing_or_unusable_backend_is_skipped_for_a_weaker_one() {
         let only_weak = vec![
-            Box::new(FakeFactory {
-                name: "broken",
-                level: SecurityLevel::Hardware,
-                usable: true,
-                opens: false,
-            }) as Box<dyn BackendFactory>,
-            Box::new(FakeFactory {
-                name: "file",
-                level: SecurityLevel::File,
-                usable: true,
-                opens: true,
-            }),
+            fake("broken", SecurityLevel::Hardware, true, false, false),
+            fake("file", SecurityLevel::File, true, true, false),
         ];
         let selection = select(&only_weak, dir(), None).await.unwrap();
         assert_eq!(selection.backend.name(), "file");
@@ -391,5 +414,23 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SelectionError::Unusable { .. }));
+    }
+
+    /// A backend that can explain its own unreachability is honoured when
+    /// forced, so `--backend keyring` on a host with no session bus reports the
+    /// store's problem instead of refusing to start.
+    #[tokio::test]
+    async fn forcing_a_self_explaining_backend_is_honoured() {
+        let candidates = vec![
+            fake("file", SecurityLevel::File, true, true, false),
+            fake("self-explaining", SecurityLevel::Keyring, false, true, true),
+        ];
+        let selection = select(&candidates, dir(), Some("self-explaining"))
+            .await
+            .unwrap();
+        assert_eq!(selection.backend.name(), "self-explaining");
+        // It is still passed over when nothing forces it.
+        let auto = select(&candidates, dir(), None).await.unwrap();
+        assert_eq!(auto.backend.name(), "file");
     }
 }

@@ -16,6 +16,8 @@ path = "src/main.rs"
 tpmd-proto.workspace = true
 tpmd-backend.workspace = true
 tpmd-backend-dummy.workspace = true
+# The keyring backend serves all three platforms, so it is built everywhere.
+tpmd-backend-keyring.workspace = true
 tpmd-ipc.workspace = true
 # The daemon ships its own diagnostic client so that "is it running, and what
 # can it do?" has a first-class answer (and so the published client library is

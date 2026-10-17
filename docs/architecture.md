@@ -17,6 +17,7 @@ the life-cycle with a simulated relay.
 | `tpmd-backend` | The `Backend` trait (async, object-safe), `SecurityLevel`, `Principal`, `Owner`, error taxonomy, `select_level` | `tpmd-proto`, `async-trait` |
 | `tpmd-store` | SeaORM entities + migrations for the **one shared SQLite file** | `sea-orm`, `sea-orm-migration` |
 | `tpmd-backend-dummy` | SQLite software P-256 store (level `file`) | `tpmd-store`, `p256` |
+| `tpmd-backend-keyring` | OS credential store (level `keyring`) | `keyring-core` + the platform store crate (`zbus-secret-service`, `apple-native`, `windows-native`), `tpmd-store`, `p256` |
 | `tpmd-backend-linux-tpm` | Linux TPM 2.0 store (levels `sealed`, `hardware`) | hand-rolled TPM2 over `/dev/tpmrm*`, `tpmd-store`, `p256`, `zeroize` |
 | `tpmd-backend-windows-cng` | Windows CNG Platform Crypto Provider store (level `hardware`) | `windows-sys` CNG (`NCrypt*`) in one `ffi` module, `tpmd-store`, `p256` |
 | `tpmd-ipc` | Local endpoints, native caller authentication, secure filesystem, framed I/O | `tokio`, `libc` / `windows-sys` |
@@ -109,6 +110,10 @@ hardware > sealed > keyring > file
   permission-protected file, neither encrypted nor hardware-backed. It reports
   `file` truthfully in `WELCOME`, `status` and every `KeyInfo` — never
   `keyring`, `sealed` or `hardware`.
+* The keyring backend achieves only **`keyring`**: the scalar is held in the
+  operating system's own credential store (Secret Service, the login keychain
+  or the Credential Manager), but signing is still software, so it must not and
+  does not claim `sealed` or `hardware`.
 * The Linux TPM backend achieves **`sealed`** (a software scalar hardware-wrapped
   at rest; the plaintext exists only while signing) and **`hardware`** (a
   non-exportable, non-duplicable key whose signing happens inside the TPM). It
@@ -133,6 +138,7 @@ hardware > sealed > keyring > file
 | Pipe protection | — | — | protected owner-only DACL on the pipe |
 | TPM device | `/dev/tpmrm0`…`tpmrm15`, then `/dev/tpm0` (override `TPMD_TPM_DEVICE`); normally `tss:tss 0660` | — | — |
 | Hardware custody | Linux TPM 2.0 (per-user or `tss` service) | — | CNG Platform Crypto Provider, per-user key store under `%APPDATA%\Microsoft\Crypto\PCPKSP\<SID>` |
+| Credential store (`keyring` level) | Secret Service on the session bus (login collection) | login keychain (Aqua session only) | Credential Manager (loaded user profile) |
 
 The `tpmd-client` looks for the user-scoped endpoint first, then the system
 endpoint, so an application does not care whether the daemon runs per-user or
@@ -203,6 +209,46 @@ which is what keeps the rest of the crate safe code and cross-checkable.
 **not** prove hardware residency, so real Windows hardware evidence is still
 owed.
 
+## OS credential store custody (WVR-151)
+
+`tpmd-backend-keyring` is the one backend that is **built everywhere**: every
+platform already has a store that protects a secret with the user's own login,
+so unlike the hardware backends this one is not gated by operating system. It
+still needs the platform *store* to differ, and that is the backend's single
+platform seam: exactly one of three store crates is compiled in, chosen by
+target OS, and everything above it is written once against `keyring-core`'s
+store trait.
+
+| OS | Store crate | Credential store |
+| --- | --- | --- |
+| Linux | `zbus-secret-service-keyring-store` (`rt-tokio-crypto-rust`) | Secret Service on the session bus, login collection |
+| macOS | `apple-native-keyring-store` (`keychain`) | login keychain, reachable only from an Aqua session |
+| Windows | `windows-native-keyring-store` | Credential Manager, under a loaded user profile |
+
+The `keyring` crate itself is deliberately **not** used. At its current major it
+hard-wires a store per platform and its own documentation tells applications
+that choose stores per platform to link `keyring-core` plus the store crates —
+and its Linux arm is the *kernel* keyring, which dies at logout and reboot, the
+exact storage class this level exists to rule out. The `dbus-secret-service`
+store is likewise unused: it needs libdbus, so it would put a C toolchain back
+into a build that has none.
+
+| Aspect | Behaviour |
+| --- | --- |
+| Addressing | The OS store is a flat `(service, user)` namespace, so the whole `(principal, namespace, key_id)` triple is folded into the *user* half, length-prefixed so a namespace containing the delimiter cannot shift the boundaries. Bounded well under the 513 characters Windows allows. |
+| Persistence | The scalar lives in the OS store as **hex text** — the Secret Service implementation some desktops ship (KDE Wallet) is UTF-8 only, so a binary secret cannot be written through it. The shared SQLite file holds only metadata and the entry address (`keyring_keys`); no scalar is ever written there. On Windows the credential is asked for with **local** (per-machine, non-roaming) persistence rather than the store's `Enterprise` default, because a device identity must not roam; if the logon session refuses durable persistence outright — as a Task Scheduler- or service-started process does, with `ERROR_NO_SUCH_LOGON_SESSION` — the write is retried once at **session** persistence and the downgrade is logged, so custody is never weakened silently and the backend is never unusable over a persistence the host cannot provide. |
+| Ownership | The `keyring_keys` row is resolved **before** the store is touched, so a foreign key and a non-existent key are the same answer and the store never learns that someone asked about a key that is not theirs. |
+| Usability probe | Once, at open: the store is built and asked a single read-only question. A store that answers "no such credential" is usable — that is the normal state before a key exists. A store that is merely *locked* is also usable, because `store_locked` is its own protocol class and dropping to a weaker store instead would silently weaken custody. |
+| Selection | A store that cannot answer makes the backend unusable, so the ladder passes over it (to the dummy) and records why. `--backend keyring` is still honoured there, so an operator asking "what is wrong with my keyring?" gets `store_locked` rather than a refusal to start. |
+| Errors | A credential the store has lost is `key_loss`; a store that will not answer is `store_locked`; neither is ever reported as a missing key. |
+| Reported store | `tpmd status` renders the backend as e.g. `keyring (secret-service)`. This is the *value* of an existing free-form string: no wire type, protocol version or client behaviour changes. |
+| Threading | Every store call runs, serialised by a process-wide lock, on a thread that carries no async runtime context: the Linux store's blocking API builds a runtime of its own and its `Drop` disconnects through it, and both panic on a thread that already has one. |
+
+That last point is also why a store that answered is kept for the life of the
+process rather than dropped: it is one session-bus connection (or one keychain
+handle) held for as long as the daemon runs anyway, and the process exit closes
+it.
+
 ## Signing contract
 
 ECDSA P-256 / SHA-256, matching `weaver_mux::auth`. Public key = 33-byte SEC1
@@ -254,9 +300,62 @@ is reachable):
   `TPM2B_PUBLIC`, an ECC `unique` is two `TPM2B`s), and the documented
   transcript hashes to the same digest the macOS and Windows runs produced.
 
+### WVR-151 (OS credential store backend)
+
+Proven on **all three platforms**, each against its own real store, with the
+store-gated tests run under `TPMD_TEST_KEYRING=require` so that a store which
+cannot be reached fails rather than silently skipping the tests that need it:
+
+* **Linux** (this machine's Secret Service): the documented happy path runs end
+  to end (`tpmd-demo run`): the `sealed` floor is refused, a key is provisioned
+  at `keyring` with consent, enrolled, signed for, verified independently,
+  re-signed deterministically, resumed across a restart, destroyed, and the agent
+  is left unreachable. `tpmd status` reports `keyring (secret-service)`.
+* **macOS** (the M1/M2 Mac's login keychain, 82 tests, 0 failures): run through a
+  launchd agent in `gui/501`, because an SSH session lands in the Background
+  domain where the login keychain is unreachable — which is also the honest
+  statement of the platform constraint, not a testing convenience.
+* **Windows** (the Windows 11 rig's Credential Manager, 99 tests, 0 failures):
+  run in the console session through a scheduled task with an interactive token.
+  Writing a credential from any other kind of session fails (see below), so this
+  is not merely how the rig is driven — it is the shape the agent will run in.
+* Keys are scoped to the authenticated principal on every platform: another
+  principal addressing a known fingerprint gets `unknown_key` on `describe`,
+  `sign` and `destroy`.
+* A credential the store has lost is `key_loss`, and a store that cannot answer
+  is `store_locked`, asserted through the real call path with the store's own
+  injected failures rather than by unit-testing the mapping alone.
+
+**Found by the rigs, not by review:** Windows' Credential Manager refuses
+*durable* credential persistence from a logon session with no profile-backed
+credential manager — `ERROR_NO_SUCH_LOGON_SESSION` for both `Local` and
+`Enterprise` — while `Session` persistence succeeds. The first Windows run failed
+every write and passed every read, which is what pointed at persistence rather
+than at the store being unreachable; `cmdkey` "working" was a red herring, since
+it writes session-persistable credentials. That is why creation now grades
+persistence (durable first, session as a logged fallback) instead of pinning one.
+
+**Measured beyond the happy path, on macOS.** With the store pointed at an
+isolated *unlocked* keychain (the user-domain default, which is what the store
+resolves) all five store-gated tests pass in 0.1 s. With that same keychain
+*locked*, a write fails in about a second with an authorization error, which the
+backend reports as `store_locked`: it does not wait for an unlock, because the
+keychain prompt belongs to the login keychain and to item ACLs rather than to the
+`SecItem*` calls this backend makes. And the same suite run over SSH fails three
+of its five tests with `User interaction is not allowed` while the two that never
+write pass — which is what makes the Aqua result evidence rather than inference:
+the login keychain is simply unreachable from launchd's Background domain.
+GitHub's `macos-latest` runner has a usable store too, and runs the same five
+tests under `TPMD_TEST_KEYRING=require` instead of skipping them.
+
+**Still owed:** the *login* keychain left locked (the measurement above locked an
+isolated keychain instead, because restoring the login one needs its password),
+the equivalent locked-collection run on Linux, and a Windows run from a service-
+or logon-started agent rather than a scheduled task.
+
 ## Out of scope
 
-The OS-keyring backend (WVR-151), the macOS Secure Enclave backend (WVR-142) and
-the Linux/user mode of the TPM crate (WVR-143); packaging and installers
+The macOS Secure Enclave backend (WVR-142); packaging and installers
 (WVR-145…150); any real relay (the demo's relay is simulated); `sign_prehash`;
-additional algorithms.
+additional algorithms. The Linux *kernel* keyring is not a store tpmd will ever
+implement: it dies with logout and reboot, so it cannot hold a device identity.
