@@ -1,0 +1,19 @@
+[Unit]
+Description=tpmd local key agent socket
+Documentation=man:tpmd(1)
+Documentation=https://github.com/OffworldNexus/tpmd
+
+[Socket]
+# This socket serves every local user of the machine, so it is world-writable
+# and each caller is authorised from kernel peer credentials instead. A per-user
+# agent binds the socket under $XDG_RUNTIME_DIR and never reaches this one.
+ListenStream=/run/tpmd/tpmd.sock
+SocketMode=0666
+# Created by systemd, before the daemon runs: a client can connect to a cold
+# machine and have its request answered once the service starts, instead of
+# racing the daemon's own bind.
+RuntimeDirectory=tpmd
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=sockets.target

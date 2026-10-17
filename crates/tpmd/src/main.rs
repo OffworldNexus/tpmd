@@ -44,7 +44,10 @@ enum Command {
 #[derive(Args)]
 struct BackendArgs {
     /// State directory holding the record. Defaults to the platform data dir.
-    #[arg(long)]
+    ///
+    /// The environment variable is how `/etc/default/tpmd` sets it, so this
+    /// looks where the packaged service keeps its record.
+    #[arg(long, env = "TPMD_STATE_DIR")]
     state_dir: Option<PathBuf>,
     #[command(subcommand)]
     action: Option<BackendAction>,
@@ -82,24 +85,35 @@ struct StatusArgs {
 struct ServeArgs {
     /// Endpoint to bind. On Unix, a socket path; defaults to the per-user
     /// endpoint (`$XDG_RUNTIME_DIR/tpmd/tpmd.sock` or equivalent), or the
-    /// system endpoint (`/run/tpmd.sock`) in system mode.
+    /// system endpoint (`/run/tpmd/tpmd.sock`) in system mode. A listener
+    /// inherited from a service manager, if there is one, takes precedence.
     #[arg(long)]
     socket: Option<PathBuf>,
     /// State directory for the backends. Defaults to the platform data dir,
     /// or `/var/lib/tpmd` in system mode.
-    #[arg(long)]
+    ///
+    /// The environment variable is how `/etc/default/tpmd` configures the
+    /// packaged service without the unit having to be rewritten.
+    #[arg(long, env = "TPMD_STATE_DIR")]
     state_dir: Option<PathBuf>,
     /// Security floor advertised to clients (enforcement follows each
     /// client's request, which must opt in with `allow_below_floor`).
-    #[arg(long, default_value = "sealed", value_name = "LEVEL")]
+    ///
+    /// The environment variable is how `/etc/default/tpmd` sets it.
+    #[arg(
+        long,
+        default_value = "sealed",
+        value_name = "LEVEL",
+        env = "TPMD_MIN_SECURITY"
+    )]
     min_key_security: String,
     /// Force a specific backend by name. Fails if that backend is not built
     /// for this platform or cannot be used on this host.
     #[arg(long, value_name = "NAME")]
     backend: Option<String>,
-    /// Run as a shared system daemon: the system endpoint (`/run/tpmd.sock`),
-    /// a socket any local user may connect to (mode 0666), and the system
-    /// state directory. Defaults on when running as root.
+    /// Run as a shared system daemon: the system endpoint
+    /// (`/run/tpmd/tpmd.sock`), a socket any local user may connect to (mode
+    /// 0666), and the system state directory. Defaults on when running as root.
     #[arg(long, conflicts_with = "user")]
     system: bool,
     /// Run as a per-user daemon: the per-user endpoint (mode 0600) and the

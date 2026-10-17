@@ -1,0 +1,176 @@
+name: deb packages
+
+# Nightly .deb builds for every currently supported Debian-like release, pushed
+# to the signed APT repository on Cloudsmith (see docs/install.md). Nothing here
+# runs on the push or pull-request path: the test suite and static analysis live
+# in ci.yml, and this workflow exists to publish, not to gate.
+on:
+  schedule:
+    # Nightly, off the hour so it does not collide with the release traffic of
+    # everyone else's nightly builds.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Version to stamp, if the default is not wanted. A tagged release
+          reuses this workflow unchanged with the tag's version.
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  CLOUDSMITH_OWNER: offworld-nexus
+  # A repository variable, not a literal: the slug is also the URL users paste
+  # into sources.list.d, so changing it must be a settings change rather than a
+  # commit. The default is the intended slug; override it while a different one
+  # is in use.
+  CLOUDSMITH_REPO: ${{ vars.CLOUDSMITH_REPO || 'tpmd' }}
+  # The suite the .deb is published under. One artifact serves every release,
+  # which is the whole reason it can be published as any-distro/any-version.
+  CLOUDSMITH_DISTRO: any-distro
+  CLOUDSMITH_VERSION: any-version
+
+jobs:
+  version:
+    name: decide the version
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.pick.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: pick
+        name: Pick a version
+        run: |
+          set -eu
+          if [ -n "${{ inputs.version }}" ]; then
+            version='${{ inputs.version }}'
+          elif [ "$GITHUB_REF_TYPE" = tag ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
+            # A tagged release is its own version: 0.1.0 sorts above every
+            # 0.1.0~nightly… that came before it, which is exactly the intent.
+            version="${GITHUB_REF_NAME#v}"
+          else
+            base=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+            version="${base}~nightly$(date -u +%Y%m%d)+g$(git rev-parse --short HEAD)"
+          fi
+          echo "packaging $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build (${{ matrix.arch }})
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # arm64 builds natively rather than under emulation: GitHub's arm64
+          # runners are free for public repositories, and this workspace under
+          # QEMU is half an hour per nightly rather than a couple of minutes.
+          # Building on the target architecture also means the container base
+          # image, the toolchain and the glibc floor are all the real ones.
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build the build environment
+        run: docker build --tag tpmd-deb:latest --file packaging/deb/Dockerfile .
+
+      - name: Build the package
+        # Mounted under /tmp, not at the filesystem root: dpkg-buildpackage
+        # writes its artefacts to the directory *above* the source tree, and only
+        # a world-writable parent lets an unprivileged build do that.
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --volume "$PWD:/tmp/src" \
+            --workdir /tmp/src \
+            --env CARGO_HOME=/tmp/cargo-home \
+            --env TPMD_DEB_VERSION='${{ needs.version.outputs.value }}' \
+            --env TPMD_DEB_COMMIT='${{ github.sha }}' \
+            tpmd-deb:latest \
+            packaging/deb/build-deb.sh dist
+
+      - name: Lint the package
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --volume "$PWD:/tmp/src" \
+            --workdir /tmp/src \
+            tpmd-deb:latest \
+            lintian --fail-on error,warning dist/*.deb
+
+      - name: Inspect what was built
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --volume "$PWD:/tmp/src" \
+            --workdir /tmp/src \
+            tpmd-deb:latest \
+            sh -c 'dpkg-deb --info dist/*.deb && dpkg-deb --contents dist/*.deb'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: dist/*.deb
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Install the Cloudsmith CLI
+        run: pipx install cloudsmith-cli
+
+      - name: Push to the APT repository
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+        run: |
+          set -eu
+          # No --no-wait-for-sync: the verify job below installs from what this
+          # pushed, so it has to be there before this step returns.
+          # --republish because a nightly rebuilding the same version is a
+          # replacement rather than a conflict.
+          for deb in dist/*.deb; do
+            echo "pushing $deb"
+            cloudsmith push deb \
+              "${CLOUDSMITH_OWNER}/${CLOUDSMITH_REPO}/${CLOUDSMITH_DISTRO}/${CLOUDSMITH_VERSION}" \
+              "$deb" \
+              --republish
+          done
+
+  verify:
+    name: verify installs (${{ matrix.arch }})
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Each runner installs the artefact built for its own architecture,
+          # from the published repository, on every supported release. This is
+          # the only place the arm64 build is ever installed and run, so a
+          # broken arm64 package cannot hide behind a green amd64 job.
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install from the published repository, release by release
+        run: packaging/deb/verify-install.sh

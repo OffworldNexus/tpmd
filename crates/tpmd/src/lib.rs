@@ -257,7 +257,21 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
 }
 
 async fn shutdown_signal() {
-    // `ctrl_c` is available on all supported platforms.
+    // A service manager stops a service with SIGTERM, so listening only for
+    // SIGINT would mean being killed rather than asked to stop, and would throw
+    // away the graceful stop that asking is for. Ctrl-C still works for a
+    // foreground run.
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut terminate) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = terminate.recv() => {}
+                _ = tokio::signal::ctrl_c() => {}
+            }
+            return;
+        }
+    }
     let _ = tokio::signal::ctrl_c().await;
 }
 

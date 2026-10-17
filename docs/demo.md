@@ -59,7 +59,7 @@ By default the agent binds the per-user endpoint:
 * Windows: `\\.\pipe\tpmd-<hash-of-your-SID>`
 
 Use `--socket` (Unix) to override it. The client tries the per-user endpoint
-first, then the Linux system endpoint `/run/tpmd.sock`.
+first, then the Linux system endpoint `/run/tpmd/tpmd.sock`.
 
 ## What each subcommand does
 
@@ -113,7 +113,7 @@ leaving your terminal printing a staircase. A detached session has no
 controlling terminal, so `sudo` cannot prompt: `--sudo` expects passwordless
 `sudo` (or a recently cached credential).
 
-`--system` runs the shared daemon: the endpoint becomes `/run/tpmd.sock`
+`--system` runs the shared daemon: the endpoint becomes `/run/tpmd/tpmd.sock`
 (mode `0666`), the state directory `/var/lib/tpmd`, and mode defaults to
 system when the effective uid is 0. `--user` forces the per-user endpoint even
 as root.

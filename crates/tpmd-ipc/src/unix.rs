@@ -26,6 +26,34 @@ pub fn user_socket_path() -> PathBuf {
     user_runtime_dir().join(crate::SOCKET_FILE_NAME)
 }
 
+/// A listener handed over by the service manager, if there is one.
+///
+/// systemd socket activation (`ListenStream=` in a `.socket` unit, `Sockets=`
+/// in the service) is how the packaged agent gets its endpoint: the manager
+/// binds it before the daemon exists, so a client reaching a cold machine is
+/// queued rather than refused, and the socket's mode and ownership stay the
+/// manager's decision rather than the daemon's.
+///
+/// `listenfd` reads the handover, which keeps the `from_raw_fd` this needs out
+/// of this file: the crate wraps it in a safe API, so nothing here reaches for
+/// `unsafe` to obtain a socket someone else opened.
+#[cfg(target_os = "linux")]
+pub fn inherited_listener() -> io::Result<Option<UnixListener>> {
+    let mut inherited = listenfd::ListenFd::from_env();
+    match inherited.take_unix_listener(0)? {
+        Some(listener) => UnixListener::from_std(listener).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// No service manager hands sockets over on this platform — a macOS agent binds
+/// its own path, as the per-user agent does everywhere — so there is nothing to
+/// inherit.
+#[cfg(not(target_os = "linux"))]
+pub fn inherited_listener() -> io::Result<Option<UnixListener>> {
+    Ok(None)
+}
+
 /// Bind a Unix socket, creating its directory and handling a stale file.
 ///
 /// A leftover socket file is unlinked only if nothing answers on it; a live

@@ -1,0 +1,35 @@
+Source: tpmd
+Section: utils
+Priority: optional
+Maintainer: Rémy Sanchez <remy.sanchez@hyperthese.net>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.0
+Homepage: https://github.com/OffworldNexus/tpmd
+Rules-Requires-Root: no
+Vcs-Git: https://github.com/OffworldNexus/tpmd.git
+Vcs-Browser: https://github.com/OffworldNexus/tpmd
+# No rustc/cargo build-dependency is declared on purpose. tpmd declares
+# rust-version = "1.98" and uses edition 2024, which is newer than the rustc in
+# every currently supported Debian-like release, so the build dependency could
+# not be satisfied anywhere. The toolchain is supplied by the build environment
+# instead; see debian/rules and docs/install.md for what that means and what
+# would have to change for a package built in the archive.
+
+Package: tpmd
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: local key agent that signs on behalf of local applications
+ tpmd owns private signing keys and signs on behalf of local applications over
+ a local socket, so that a consumer never sees key material: it asks for a
+ signature and gets one, or gets a refusal that says why.
+ .
+ Keys live at a security level — file, keyring, sealed or hardware — and the
+ daemon selects the strongest level the machine can actually reach. It refuses
+ to serve anything below the floor it was started with rather than quietly
+ handing out a weaker key, it never re-keys a device to satisfy a request, and
+ it never replaces a lost key with a weaker one.
+ .
+ This package installs the system-wide agent: a socket-activated service that
+ serves every local user and authorises each caller from kernel peer
+ credentials. A per-user agent can also be run by hand, and the tpmd-demo tool
+ shipped here exercises an installed agent end to end.

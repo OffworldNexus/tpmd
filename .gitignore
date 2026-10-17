@@ -21,3 +21,22 @@ packaging/build/
 *.app
 *.p8
 *.mobileprovision
+
+# Local secrets. The root .env holds publishing credentials (the Cloudsmith API
+# key among them) and must never be committed — the file name is ignored at the
+# root only, so the committed `packaging/fastlane/.env.default` template stays
+# tracked.
+/.env
+/.env.*
+
+# Debian packaging artefacts. `debian/` itself is committed; everything below is
+# produced by a package build and must never be.
+/dist/
+/debian/cargo-home/
+/debian/files
+/debian/tpmd/
+/debian/.debhelper/
+/debian/changelog.orig
+*.deb
+*.buildinfo
+*.changes

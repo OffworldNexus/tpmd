@@ -1,0 +1,160 @@
+.TH TPMD 1 "2026" "tpmd" "User Commands"
+.SH NAME
+tpmd \- local key agent
+.SH SYNOPSIS
+.B tpmd
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+.B tpmd
+owns private signing keys and signs on behalf of local applications over a
+local socket. A consumer never sees key material: it asks for a signature and
+gets one, or gets a refusal that says why.
+.PP
+Keys live at a
+.IR "security level" ,
+weakest first:
+.BR file ,
+.BR keyring ,
+.B sealed
+and
+.BR hardware .
+The daemon selects the strongest level the machine can actually reach, and
+refuses to serve anything below the floor it was started with rather than
+quietly handing out a weaker key.
+.PP
+On Linux the daemon runs in one of two modes. A
+.I system
+daemon serves every local user and authorises each caller from kernel peer
+credentials; a
+.I user
+agent serves only the account that started it and is normally started on
+demand by that account. The two use different sockets and different stores.
+.SH COMMANDS
+.TP
+.B serve
+Run the agent in the foreground. This is what the service runs; it does not
+daemonise itself.
+.TP
+.B status
+Ask a running agent whether it is reachable and what it can do: the backend it
+chose, the level it achieved, and whether its store is open.
+.TP
+.B backend
+Show, change or forget which backend this machine uses. The first successful
+start records the choice, and later starts keep it, so a machine does not
+silently change custody after a reboot.
+.RS
+.TP
+.B backend show
+Print the recorded choice and the reason for it. The default.
+.TP
+.BI "backend set " name " \-\-yes"
+Choose a backend deliberately, replacing the recorded one. It can re-key the
+device, hence the confirmation.
+.TP
+.B backend clear
+Forget the choice, so the next start runs the selection ladder again.
+.RE
+.SH OPTIONS
+.SS serve
+.TP
+.BI \-\-socket " path"
+Bind this endpoint instead of the platform default. On Unix in system mode the
+default is
+.IR /run/tpmd/tpmd.sock ,
+and in user mode
+.IR "$XDG_RUNTIME_DIR/tpmd/tpmd.sock" .
+A socket inherited from systemd, if there is one, wins over both.
+.TP
+.BI \-\-state\-dir " path"
+Directory holding the key store. Defaults to
+.I /var/lib/tpmd
+in system mode and to the platform data directory
+.RI ( "$XDG_DATA_HOME/tpmd" )
+in user mode.
+.TP
+.BI \-\-min\-key\-security " level"
+The weakest custody the daemon will serve. One of
+.BR file ,
+.BR keyring ,
+.BR sealed
+or
+.BR hardware .
+Defaults to
+.BR sealed .
+.TP
+.BI \-\-backend " name"
+Force one backend. A machine is meant to keep the backend it chose; naming one
+that contradicts the record is an error at start\-up rather than a silent
+override.
+.TP
+.B \-\-system
+Run as the shared system daemon. Implied by an effective uid of 0, which is why
+the packaged unit passes it explicitly: it does not run as root.
+.TP
+.B \-\-user
+Run as a per\-user agent.
+.SS status
+.TP
+.BI \-\-socket " path"
+Endpoint to reach. Defaults to the per\-user endpoint, then the system one.
+.TP
+.BI \-\-namespace " name"
+Namespace to ask as. Keys are scoped by namespace, so this only changes which
+namespace the agent reports on. Defaults to
+.BR tpmd\-status .
+.SS backend
+.TP
+.BI \-\-state\-dir " path"
+Directory holding the record. Same default as
+.BR serve .
+.SH ENVIRONMENT
+.TP
+.B TPMD_STATE_DIR
+Overrides the state directory, in either mode. The packaged service also reads
+it from
+.IR /etc/default/tpmd .
+.TP
+.B TPMD_MIN_SECURITY
+The default for
+.BR \-\-min\-key\-security .
+.TP
+.B TPMD_TPM_DEVICE
+Pin one TPM device node, for example
+.IR /dev/tpmrm0 ,
+instead of scanning for one.
+.TP
+.B RUST_LOG
+Log filter, in tracing's EnvFilter syntax.
+.TP
+.B XDG_RUNTIME_DIR
+Where the per\-user socket is placed, as
+.IR "$XDG_RUNTIME_DIR/tpmd/tpmd.sock" .
+.TP
+.B XDG_DATA_HOME
+Where the per\-user store is placed, as
+.IR "$XDG_DATA_HOME/tpmd/keys.sqlite" .
+.SH FILES
+.TP
+.I /etc/default/tpmd
+Configuration for the packaged system service.
+.TP
+.I /var/lib/tpmd/keys.sqlite
+The system store. It holds the device identity; deleting it destroys every key
+this machine owns, and neither removal nor purge of the package does so.
+.TP
+.I /run/tpmd/tpmd.sock
+The system socket, created by
+.BR tpmd.socket .
+.SH SECURITY
+The system socket is world\-writable by design: any local user may connect, and
+the daemon decides what each caller may do from the credentials the kernel
+reports for the peer.
+.PP
+The daemon refuses operations below its security floor. It does not re\-key a
+device to satisfy a request, and it does not downgrade a key that has been
+lost: a lower level is a different key, or a refusal.
+.SH SEE ALSO
+.BR tpmd-demo (1),
+.BR systemctl (1)

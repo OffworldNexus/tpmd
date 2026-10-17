@@ -1,0 +1,22 @@
+# Configuration for the tpmd system service, read by tpmd.service and passed
+# into the daemon's environment. The commented values are the defaults.
+#
+# A per-user agent (`tpmd serve --user`) does not read this file: it takes its
+# own state and socket paths from the per-user environment.
+
+# Where the key store lives. It must stay writable by the tss user, and it holds
+# the device identity: destroying it destroys every key this machine owns.
+#TPMD_STATE_DIR=/var/lib/tpmd
+
+# The weakest custody the daemon will serve, weakest first:
+# file < keyring < sealed < hardware. Operations below it are refused rather
+# than served, so this is the setting that decides whether a machine without a
+# usable TPM is useful or safely useless. Changing it never re-keys anything.
+#TPMD_MIN_SECURITY=sealed
+
+# Pin one TPM device node instead of scanning the resource-manager devices in
+# order. Only meaningful where the local TPM backend is in use.
+#TPMD_TPM_DEVICE=/dev/tpmrm0
+
+# Log filter, in tracing's EnvFilter syntax.
+#RUST_LOG=tpmd=info

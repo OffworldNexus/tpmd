@@ -1,0 +1,46 @@
+#!/usr/bin/make -f
+#
+# The Rust toolchain is supplied by the build environment rather than by a
+# build-dependency: tpmd declares rust-version = "1.98" and uses edition 2024,
+# which is newer than the rustc in every currently supported Debian-like
+# release, so dh-cargo's packaged-sources build cannot be used for this package.
+# The Debian Rust Team's policy is nevertheless followed in shape — this file,
+# the control fields, the DEP-5 copyright, the debhelper systemd integration,
+# the /etc/default file and the man pages are what that policy asks for — and
+# docs/install.md records the deviation and its consequences.
+
+# The policy requires $CARGO_HOME to live inside the package build directory, so
+# that a build never writes to the building user's home.
+export CARGO_HOME := $(CURDIR)/debian/cargo-home
+# Symbols: the workspace's release profile strips the binary, and that stands
+# here. Debian's convention is for dh_strip to split them into a -dbgsym
+# package, which an archive can serve alongside its sources; a third-party
+# repository is not an archive and has nowhere sensible to publish one, so we
+# ship the stripped binary and produce none. Set
+# CARGO_PROFILE_RELEASE_STRIP=none here if that ever changes.
+
+%:
+	dh $@
+
+# There is no build system to detect and nothing to probe that cargo does not
+# probe itself.
+override_dh_auto_configure:
+
+override_dh_auto_build:
+	cargo build --release --locked --verbose --bin tpmd --bin tpmd-demo
+
+# The suite needs a session bus and a credential store, which a package build
+# has no business providing. It runs in CI instead, on every change; see
+# .github/workflows/ci.yml.
+override_dh_auto_test:
+
+# dh_install is deliberately not used: two of the four destinations need a name
+# that differs from their source, which dh_install does not support — it reads
+# such a destination as a directory — and dh-exec would be an extra
+# build-dependency to save four lines. Placement is therefore explicit.
+override_dh_auto_install:
+	install -D -m 0755 target/release/tpmd $(CURDIR)/debian/tpmd/usr/bin/tpmd
+	install -D -m 0755 target/release/tpmd-demo $(CURDIR)/debian/tpmd/usr/bin/tpmd-demo
+	install -D -m 0644 debian/tpmd.default $(CURDIR)/debian/tpmd/etc/default/tpmd
+	install -D -m 0644 debian/tpmd-udev.rules $(CURDIR)/debian/tpmd/usr/lib/udev/rules.d/60-tpmd.rules
+	install -D -m 0644 debian/sysusers.d/tpmd.conf $(CURDIR)/debian/tpmd/usr/lib/sysusers.d/tpmd.conf
