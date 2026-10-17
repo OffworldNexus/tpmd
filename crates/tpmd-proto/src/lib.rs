@@ -9,7 +9,8 @@
 //! # The contract at a glance
 //!
 //! * The first message the client sends is [`Message::Hello`]; the daemon
-//!   answers [`Message::Welcome`] or [`Message::Reject`].
+//!   answers [`Message::Welcome`], [`Message::Closed`] (the store is shut, which
+//!   is not fatal and can be waited out) or [`Message::Reject`].
 //! * Afterwards, every exchange is a [`Request`] / [`Response`] pair matched
 //!   by an opaque `id`.
 //! * Messages are Postcard-encoded and framed as a `u32` big-endian length
@@ -29,9 +30,9 @@ mod wire;
 pub use frame::{FRAME_LEN_BYTES, FrameError, decode_frame, encode_frame, parse_frame_len};
 pub use types::{Algorithm, KeyId, SecurityLevel, Signature};
 pub use wire::{
-    Capabilities, ErrorCode, ErrorDetail, ErrorReply, Hello, KeyInfo, KeyOutcome, KeyRequest,
-    Limits, Message, Op, ProvisionRequest, Reject, RejectCode, Reply, Request, Response, Status,
-    Welcome,
+    Capabilities, Closed, ErrorCode, ErrorDetail, ErrorReply, Hello, KeyInfo, KeyOutcome,
+    KeyRequest, Limits, Message, Op, ProvisionRequest, Reject, RejectCode, Reply, Request,
+    Response, Status, StoreState, Welcome,
 };
 
 /// Lowest protocol version this build accepts.

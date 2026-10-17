@@ -26,6 +26,7 @@
 
 use p256::ecdsa::VerifyingKey;
 use p256::ecdsa::signature::Verifier as _;
+use std::time::Duration;
 use tpmd_backend::{Backend, BackendError, Owner, Principal};
 use tpmd_backend_keyring::KeyringBackend;
 use tpmd_proto::{Algorithm, KeyId, SecurityLevel, Signature};
@@ -231,4 +232,71 @@ async fn the_backend_names_the_store_it_uses() {
         "unexpected mechanism {mechanism}"
     );
     assert_eq!(backend.name(), "keyring");
+}
+
+/// **Experiment**: does the bus actually wake us, or are we only ever saved by
+/// the safety net?
+///
+/// Writing a credential changes the default collection, which should show up as a
+/// signal on the bus. The bound here is *below* the safety net, so passing means
+/// a real signal arrived. Failing does not mean the provider is broken — it means
+/// this store does not announce writes, and the unlock case is the one to verify
+/// on a machine where the collection can be locked and unlocked.
+#[tokio::test]
+async fn the_bus_wakes_us_for_a_real_change() {
+    let Some((_dir, backend)) = usable_backend().await else {
+        return;
+    };
+    let Some(hints) = backend.unlock_hints() else {
+        return;
+    };
+
+    // Wait for a hint while something real happens to the store.
+    let waiting = tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        hints.next_hint().await;
+        started.elapsed()
+    });
+
+    // Give the subscription a moment to be established, then write.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let info = backend
+        .provision(
+            &owner("uid:1000"),
+            Algorithm::EcdsaP256Sha256,
+            SecurityLevel::Keyring,
+        )
+        .await
+        .unwrap();
+
+    let elapsed = waiting.await.unwrap();
+    backend
+        .destroy(&owner("uid:1000"), &info.key_id)
+        .await
+        .unwrap();
+
+    eprintln!("hint arrived after {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "expected a bus signal well before the safety net, waited {elapsed:?}"
+    );
+}
+/// A hint must always arrive, however long it takes.
+///
+/// This is the one property the whole closed-store design leans on: a provider
+/// that never fires would park a client for ever, and "wait for ever" is exactly
+/// the failure the `closed`/`gone` distinction exists to avoid. The bound here is
+/// generous — a bus signal should arrive in milliseconds and the safety net is
+/// seconds — and what it catches is a subscription that neither signals nor falls
+/// back.
+#[tokio::test]
+async fn a_hint_always_arrives() {
+    let Some((_dir, backend)) = usable_backend().await else {
+        return;
+    };
+    let Some(hints) = backend.unlock_hints() else {
+        panic!("a store that can be locked must be able to say when it reopens");
+    };
+    let arrived = tokio::time::timeout(Duration::from_secs(30), hints.next_hint()).await;
+    assert!(arrived.is_ok(), "a hint must eventually arrive");
 }

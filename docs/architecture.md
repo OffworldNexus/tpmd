@@ -236,7 +236,7 @@ into a build that has none.
 | Aspect | Behaviour |
 | --- | --- |
 | Addressing | The OS store is a flat `(service, user)` namespace, so the whole `(principal, namespace, key_id)` triple is folded into the *user* half, length-prefixed so a namespace containing the delimiter cannot shift the boundaries. Bounded well under the 513 characters Windows allows. |
-| Persistence | The scalar lives in the OS store as **hex text** — the Secret Service implementation some desktops ship (KDE Wallet) is UTF-8 only, so a binary secret cannot be written through it. The shared SQLite file holds only metadata and the entry address (`keyring_keys`); no scalar is ever written there. On Windows the credential is asked for with **local** (per-machine, non-roaming) persistence rather than the store's `Enterprise` default, because a device identity must not roam; if the logon session refuses durable persistence outright — as a Task Scheduler- or service-started process does, with `ERROR_NO_SUCH_LOGON_SESSION` — the write is retried once at **session** persistence and the downgrade is logged, so custody is never weakened silently and the backend is never unusable over a persistence the host cannot provide. |
+| Persistence | The scalar lives in the OS store as **hex text** — the Secret Service implementation some desktops ship (KDE Wallet) is UTF-8 only, so a binary secret cannot be written through it. The shared SQLite file holds only metadata and the entry address (`keyring_keys`); no scalar is ever written there. On Windows the credential is asked for with **local** (per-machine, non-roaming) persistence rather than the store's `Enterprise` default, because a device identity must not roam; a logon session that refuses durable persistence — a Task Scheduler- or service-started process answering `ERROR_NO_SUCH_LOGON_SESSION` — is met with a **failure**, never a retry at session persistence. A key that evaporates at logoff is a custody change nobody agreed to, and a line in a background service's log is not where a caller learns it: the refusal is reported, and it counts as *gone* rather than *closed* because nothing the user does in that session changes it. |
 | Ownership | The `keyring_keys` row is resolved **before** the store is touched, so a foreign key and a non-existent key are the same answer and the store never learns that someone asked about a key that is not theirs. |
 | Usability probe | Once, at open: the store is built and asked a single read-only question. A store that answers "no such credential" is usable — that is the normal state before a key exists. A store that is merely *locked* is also usable, because `store_locked` is its own protocol class and dropping to a weaker store instead would silently weaken custody. |
 | Selection | A store that cannot answer makes the backend unusable, so the ladder passes over it (to the dummy) and records why. `--backend keyring` is still honoured there, so an operator asking "what is wrong with my keyring?" gets `store_locked` rather than a refusal to start. |
@@ -248,6 +248,56 @@ That last point is also why a store that answered is kept for the life of the
 process rather than dropped: it is one session-bus connection (or one keychain
 handle) held for as long as the daemon runs anyway, and the process exit closes
 it.
+
+## A closed store is a state, not an error (WVR-152)
+
+A user-session store is shut *normally*: the screen is locked, the user is at
+lunch, the keyring daemon has not started. The daemon therefore distinguishes two
+conditions by **who can change it** (protocol §9.1):
+
+| | `closed` | `gone` |
+| --- | --- | --- |
+| The dependency | exists, will not answer yet | is not there, or cannot be opened |
+| Changed by | **the user** — unlock it, log in | nobody, in this daemon's lifetime |
+| The daemon | answers `CLOSED` (non-fatal) and offers a wait | answers `REJECT backend_unavailable` and closes |
+| The client | waits, or retries later | tells its user tpmd needs an administrator |
+
+The classification is the **backend's**, because only it knows its own
+dependency, and it is made by probing *existence* rather than by reading error
+text — per-platform because the remedies are:
+
+* a locked keychain or collection → `closed` (the user unlocks it);
+* Windows' refused durable write → `gone` (a logon-session property: nothing the
+  user does *inside* that session changes it);
+* a store that cannot even be built → `gone` (no session bus, no provider).
+
+**Waiting is only ever offered for `closed`.** A gone store is refused
+immediately, and a store that turns out to be gone mid-wait ends the wait with an
+error — so a client can never be parked on something that will not return. Every
+wait ends in `OPENED`, a timeout the client chose, or that error.
+
+**One watcher per daemon, not per client.** `crates/tpmd/src/store_watch.rs`
+holds the store's cached state and a single detector task, started on demand and
+stopped as soon as it has nothing to tell and no listeners: a daemon with nobody
+waiting polls nothing. The detector is woken by `Backend::unlock_hints()` —
+on Linux a real session-bus signal (the Secret Service's name changing, or its
+default collection's properties or items changing), elsewhere a backoff interval
+(0.5 s doubling to 10 s). Every hint is followed by a probe, because a hint is an
+opportunity to check, never a promise; and the Linux provider also carries a
+5-second safety net, since a signal can be missed and a hint provider that never
+fires would park a client for ever. Measured on this machine's Secret Service: a
+real store change woke the watcher in **23 ms**, against 5 s for the net alone.
+
+Requests are dispatched on their own tasks and answers are written by a separate
+writer task, which is what lets a parked `AWAIT` coexist with other requests on
+the same connection: the protocol permits pipelined requests and out-of-order
+answers, and a waiting client can still ask `STATUS`.
+
+`tpmd-client` follows the same split: `StoreClosed` for a store it may retry (its
+connect path waits for up to `DEFAULT_STORE_WAIT` by default, with
+`connect_within` for a different patience and `await_store_open` to recover
+mid-session), and `BackendUnavailable` for the one condition that retrying cannot
+fix, so applications cannot confuse it with a transport failure.
 
 ## Signing contract
 
@@ -332,8 +382,11 @@ credential manager — `ERROR_NO_SUCH_LOGON_SESSION` for both `Local` and
 `Enterprise` — while `Session` persistence succeeds. The first Windows run failed
 every write and passed every read, which is what pointed at persistence rather
 than at the store being unreachable; `cmdkey` "working" was a red herring, since
-it writes session-persistable credentials. That is why creation now grades
-persistence (durable first, session as a logged fallback) instead of pinning one.
+it writes session-persistable credentials. That is why creation asks for **local**
+persistence and **fails** if it is refused, rather than grading down: a key that
+evaporates at logoff is a custody change nobody agreed to. The refusal is
+classified as *gone*, not merely *closed*, because nothing the user does in that
+session changes it (see the closed-store section, WVR-152).
 
 **Measured beyond the happy path, on macOS.** With the store pointed at an
 isolated *unlocked* keychain (the user-domain default, which is what the store

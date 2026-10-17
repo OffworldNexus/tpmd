@@ -123,3 +123,10 @@ skip them where touching the login keyring would prompt.
   thread that already has a runtime context, `spawn_blocking` threads included;
   `tpmd-backend-keyring` owns the only correct path and nothing else may take a
   shortcut around it.
+- Do not park a client on a store that is *gone*. Only a **closed** store is
+  waitable — something the user can change — and every wait must end in `OPENED`
+  or an error. "Waiting for ever" is the failure the closed/gone split exists to
+  prevent, so a hint provider that can never fire is a bug, not patience.
+- Do not answer "not now" with `REJECT`. It closes the socket and is reserved for
+  the fatal cases; a closed store is answered with the non-fatal `CLOSED`, which
+  is the only refusal that keeps the connection.

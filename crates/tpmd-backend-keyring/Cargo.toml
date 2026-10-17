@@ -32,6 +32,9 @@ tracing.workspace = true
 # and reboot, which is the storage class this level exists to avoid.
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
 zbus-secret-service-keyring-store = { workspace = true, features = ["rt-tokio-crypto-rust"] }
+# Watching the bus for an unlock, which the store crate does not expose.
+zbus.workspace = true
+futures-util.workspace = true
 
 # macOS: the login keychain, through the Security framework (an OS component;
 # nothing is bundled and no C toolchain is required to build).

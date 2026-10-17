@@ -3266,6 +3266,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "thiserror",
+ "tokio",
  "tpmd-proto",
 ]
 
@@ -3293,6 +3294,7 @@ version = "0.1.0"
 dependencies = [
  "apple-native-keyring-store",
  "async-trait",
+ "futures-util",
  "getrandom 0.3.4",
  "hex",
  "keyring-core",
@@ -3305,6 +3307,7 @@ dependencies = [
  "tpmd-store",
  "tracing",
  "windows-native-keyring-store",
+ "zbus",
  "zbus-secret-service-keyring-store",
  "zeroize",
 ]
