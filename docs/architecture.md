@@ -20,6 +20,7 @@ the life-cycle with a simulated relay.
 | `tpmd-backend-keyring` | OS credential store (level `keyring`) | `keyring-core` + the platform store crate (`zbus-secret-service`, `apple-native`, `windows-native`), `tpmd-store`, `p256` |
 | `tpmd-backend-linux-tpm` | Linux TPM 2.0 store (levels `sealed`, `hardware`) | hand-rolled TPM2 over `/dev/tpmrm*`, `tpmd-store`, `p256`, `zeroize` |
 | `tpmd-backend-windows-cng` | Windows CNG Platform Crypto Provider store (level `hardware`) | `windows-sys` CNG (`NCrypt*`) in one `ffi` module, `tpmd-store`, `p256` |
+| `tpmd-backend-macos-se` | macOS Secure Enclave store (level `hardware`) | `security-framework` (safe wrappers, no `unsafe`), `tpmd-store`, `p256` |
 | `tpmd-ipc` | Local endpoints, native caller authentication, secure filesystem, framed I/O | `tokio`, `libc` / `windows-sys` |
 | `tpmd` | Daemon: serve loop, caller auth, namespace + floor enforcement, backend registry and selection, CLI | the above |
 | `tpmd-client` | Consumer API hiding the transport | `tpmd-proto`, `tpmd-ipc` |
@@ -101,6 +102,7 @@ graph TD
   daemon --> dummy["tpmd-backend-dummy"]
   daemon --> linuxtpm["tpmd-backend-linux-tpm<br/>(Linux only)"]
   daemon --> wincng["tpmd-backend-windows-cng<br/>(Windows only)"]
+  daemon --> macse["tpmd-backend-macos-se<br/>(macOS only)"]
   dummy --> backend
   dummy --> store["tpmd-store"]
   linuxtpm --> backend
@@ -171,7 +173,7 @@ hardware > sealed > keyring > file
 | Store protection | dir `0700`, DB `0600`; the WAL `-wal`/`-shm` sidecars live in that directory | same | protected owner-only DACL on dir and file |
 | Pipe protection | — | — | protected owner-only DACL on the pipe |
 | TPM device | `/dev/tpmrm0`…`tpmrm15`, then `/dev/tpm0` (override `TPMD_TPM_DEVICE`); normally `tss:tss 0660` | — | — |
-| Hardware custody | Linux TPM 2.0 (per-user or `tss` service) | — | CNG Platform Crypto Provider, per-user key store under `%APPDATA%\Microsoft\Crypto\PCPKSP\<SID>` |
+| Hardware custody | Linux TPM 2.0 (per-user or `tss` service) | Secure Enclave (per-user agent, from a signed bundle in the Aqua session) | CNG Platform Crypto Provider, per-user key store under `%APPDATA%\Microsoft\Crypto\PCPKSP\<SID>` |
 | Credential store (`keyring` level) | Secret Service on the session bus (login collection) | login keychain (Aqua session only) | Credential Manager (loaded user profile) |
 
 The `tpmd-client` looks for the user-scoped endpoint first, then the system
@@ -453,7 +455,7 @@ machine, which belongs with WVR-149.
 
 ## Out of scope
 
-The macOS Secure Enclave backend (WVR-142); packaging and installers
+Packaging and installers
 (WVR-145…150); any real relay (the demo's relay is simulated); `sign_prehash`;
 additional algorithms. The Linux *kernel* keyring is not a store tpmd will ever
 implement: it dies with logout and reboot, so it cannot hold a device identity.

@@ -8,6 +8,7 @@ members = [
     "crates/tpmd-backend-keyring",
     "crates/tpmd-backend-linux-tpm",
     "crates/tpmd-backend-windows-cng",
+    "crates/tpmd-backend-macos-se",
     "crates/tpmd-ipc",
     "crates/tpmd",
     "crates/tpmd-client",
@@ -32,9 +33,18 @@ tpmd-backend-dummy = { path = "crates/tpmd-backend-dummy", version = "0.1.0" }
 tpmd-backend-keyring = { path = "crates/tpmd-backend-keyring", version = "0.1.0" }
 tpmd-backend-linux-tpm = { path = "crates/tpmd-backend-linux-tpm", version = "0.1.0" }
 tpmd-backend-windows-cng = { path = "crates/tpmd-backend-windows-cng", version = "0.1.0" }
+tpmd-backend-macos-se = { path = "crates/tpmd-backend-macos-se", version = "0.1.0" }
 tpmd-ipc = { path = "crates/tpmd-ipc", version = "0.1.0" }
 tpmd-client = { path = "crates/tpmd-client", version = "0.1.0" }
 
+# macOS Secure Enclave access, through safe wrappers — so this backend needs no
+# `unsafe` either, which is why it is not a third exception to the rule in
+# AGENTS.md. `OSX_10_15` is not in `security-framework`'s default feature set and
+# is what makes `Location::DataProtectionKeychain` — the keychain Secure Enclave
+# keys must live in — expressible without reaching for raw constants by hand.
+security-framework = { version = "3.7", features = ["OSX_10_15"] }
+security-framework-sys = "2.17"
+core-foundation = "0.10"
 clap = { version = "4.5", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 # serde has no Serialize/Deserialize impl for arrays longer than 32 bytes;

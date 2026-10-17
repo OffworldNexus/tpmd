@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The entitlement that authorises the data protection keychain, and with
+	     it the Secure Enclave. It is a *managed* entitlement: it is only valid
+	     when the bundle also carries a provisioning profile that grants it, which
+	     is why a plain `codesign` of the same entitlement is killed at exec. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)nexus.offworld.tpmd</string>
+	</array>
+</dict>
+</plist>

@@ -3255,6 +3255,7 @@ dependencies = [
  "tpmd-backend-dummy",
  "tpmd-backend-keyring",
  "tpmd-backend-linux-tpm",
+ "tpmd-backend-macos-se",
  "tpmd-backend-windows-cng",
  "tpmd-client",
  "tpmd-ipc",
@@ -3335,6 +3336,27 @@ dependencies = [
  "tpmd-store",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "tpmd-backend-macos-se"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "core-foundation",
+ "getrandom 0.3.4",
+ "hex",
+ "p256",
+ "sea-orm",
+ "security-framework",
+ "security-framework-sys",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tpmd-backend",
+ "tpmd-proto",
+ "tpmd-store",
+ "tracing",
 ]
 
 [[package]]

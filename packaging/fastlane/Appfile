@@ -1,0 +1,8 @@
+# fastlane's identity for the macOS agent.
+#
+# Everything here is configuration a *deployment* owns, never a secret baked
+# into the repository: the identifier and the team come from the environment
+# (`.env` locally, secrets in CI), and the certificate and provisioning profile
+# are produced by Xcode's automatic signing, so there is nothing to store.
+app_identifier ENV.fetch("TPMD_BUNDLE_ID", "nexus.offworld.tpmd")
+team_id ENV["DEVELOPMENT_TEAM"]
