@@ -67,8 +67,10 @@ printf 'building tpmd %s for %s\n' "$version" "$(dpkg-architecture -qDEB_HOST_AR
 dpkg-buildpackage --build=binary --no-sign --unsigned-source
 
 # The binaries land next to the source tree, which is dpkg's convention and not
-# ours; collect them where the caller asked.
-find .. -maxdepth 1 -name 'tpmd_*.deb' -exec mv {} "$out" \;
+# ours; collect them where the caller asked. The pattern covers every package in
+# the set, not just the daemon: `tpmd_*` silently dropped the backend packages,
+# which then never reached the repository while every check still passed.
+find .. -maxdepth 1 -name 'tpmd*.deb' -exec mv {} "$out" \;
 
 printf 'artifacts:\n'
 ls -l "$out"
