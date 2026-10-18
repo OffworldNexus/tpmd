@@ -68,9 +68,54 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "component=$component" >> "$GITHUB_OUTPUT"
 
+  # One source package per run, built once and shared: it is published beside the
+  # binaries, and every architecture builds its binaries *from* it, so what
+  # `apt-get source tpmd` hands a user is what the published binaries came from.
+  source:
+    name: source package
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build the build environment
+        run: docker build --tag tpmd-deb:latest --file packaging/deb/Dockerfile .
+
+      - name: Build the source package
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --volume "$PWD:/tmp/src" \
+            --workdir /tmp/src \
+            --env CARGO_HOME=/tmp/cargo-home \
+            --env TPMD_DEB_VERSION='${{ needs.version.outputs.value }}' \
+            --env TPMD_DEB_COMMIT='${{ github.sha }}' \
+            tpmd-deb:latest \
+            packaging/deb/build-source.sh dist
+
+      - name: Lint the source package
+        # newer-standards-version only: the pinned container is the oldest
+        # supported release, and its lintian predates the policy version the
+        # package declares. Everything else fails the build.
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --volume "$PWD:/tmp/src" \
+            --workdir /tmp/src \
+            tpmd-deb:latest \
+            lintian --fail-on error,warning --suppress-tags newer-standards-version dist/*.dsc
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-source
+          path: |
+            dist/*.dsc
+            dist/*.tar.xz
+          if-no-files-found: error
+
   build:
     name: build (${{ matrix.arch }})
-    needs: version
+    needs: [version, source]
     strategy:
       fail-fast: false
       matrix:
@@ -91,18 +136,23 @@ jobs:
       - name: Build the build environment
         run: docker build --tag tpmd-deb:latest --file packaging/deb/Dockerfile .
 
-      - name: Build the package
-        # Mounted under /tmp, not at the filesystem root: dpkg-buildpackage
-        # writes its artefacts to the directory *above* the source tree, and only
-        # a world-writable parent lets an unprivileged build do that.
+      - uses: actions/download-artifact@v5
+        with:
+          name: deb-source
+          path: source
+
+      - name: Build the packages from the source package
+        # --network none is the proof that the published source is complete: a
+        # build that needed anything beyond the .dsc and its tarball fails here,
+        # rather than working in CI and nowhere else.
         run: |
           docker run --rm \
+            --network none \
             --user "$(id -u):$(id -g)" \
             --volume "$PWD:/tmp/src" \
             --workdir /tmp/src \
             --env CARGO_HOME=/tmp/cargo-home \
-            --env TPMD_DEB_VERSION='${{ needs.version.outputs.value }}' \
-            --env TPMD_DEB_COMMIT='${{ github.sha }}' \
+            --env TPMD_DEB_DSC="$(ls source/*.dsc)" \
             tpmd-deb:latest \
             packaging/deb/build-deb.sh dist
 
@@ -152,11 +202,15 @@ jobs:
           # pushed, so it has to be there before this step returns.
           # --republish because a nightly rebuilding the same version is a
           # replacement rather than a conflict.
-          for deb in dist/*.deb; do
-            echo "pushing $deb"
+          # The .dsc is pushed like a .deb: the CLI reads the files it lists
+          # and uploads the tarball with it, and the repository then serves it
+          # to `apt-get source`. The `deb-src` line the setup script writes
+          # expects it to be there.
+          for package in dist/*.deb dist/*.dsc; do
+            echo "pushing $package"
             cloudsmith push deb \
               "${CLOUDSMITH_OWNER}/${CLOUDSMITH_REPO}/${CLOUDSMITH_DISTRO}/${CLOUDSMITH_VERSION}" \
-              "$deb" \
+              "$package" \
               --component '${{ needs.version.outputs.component }}' \
               --republish
           done
@@ -203,7 +257,7 @@ jobs:
   release:
     name: git release
     if: github.ref_type == 'tag' && vars.RELEASE_ARTIFACTS_COMPLETE == 'true'
-    needs: [version, build, publish, verify]
+    needs: [version, source, build, publish, verify]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -12,18 +12,19 @@
 # There are two build modes, and the difference between them is *where a backend
 # comes from*:
 #
-#   * the default (`TPMD_DEB_SPLIT=0`) links every backend into the daemon, which
-#     is what a plain `cargo build` produces and what a single-package .deb has
-#     always shipped;
-#   * the split (`TPMD_DEB_SPLIT=1`) builds the daemon with `loadable-backends`
-#     — the dummy and nothing else — and one `cdylib` per backend to ship in its
-#     own package.
+#   * the split (`TPMD_DEB_SPLIT=1`, the default) builds the daemon with
+#     `loadable-backends` — the dummy and nothing else — and one `cdylib` per
+#     backend to ship in its own package. It is what the repository publishes;
+#   * `TPMD_DEB_SPLIT=0` links every backend into the daemon, as a plain
+#     `cargo build` does, and ships it as the single `tpmd` package.
 #
-# Nothing but packaging/deb/build-deb.sh turns the split on, which is the point:
-# a normal `cargo build` or `cargo test --workspace` never asks for the feature
-# and never produces a shared object. The backend packages are declared in
-# debian/control for the split, so the default mode excludes them from the
-# debhelper sequence rather than shipping them empty.
+# The split is the default because this file is what the published source
+# package builds with: whoever rebuilds that source gets the set the repository
+# serves, not a different one. A normal `cargo build` or `cargo test --workspace`
+# never reads this file, never asks for the feature and never produces a shared
+# object, which is what keeps the ordinary build the monolith. The backend
+# packages are declared in debian/control for the split, so `TPMD_DEB_SPLIT=0`
+# excludes them from the debhelper sequence rather than shipping them empty.
 
 # The policy requires $CARGO_HOME to live inside the package build directory, so
 # that a build never writes to the building user's home.
@@ -35,7 +36,17 @@ export CARGO_HOME := $(CURDIR)/debian/cargo-home
 # ship the stripped binary and produce none. Set
 # CARGO_PROFILE_RELEASE_STRIP=none here if that ever changes.
 
-TPMD_DEB_SPLIT ?= 0
+TPMD_DEB_SPLIT ?= 1
+
+# The published source package carries every dependency in vendor/
+# (packaging/deb/build-source.sh), and a build of it must not reach the network:
+# crates.io is replaced by that directory and cargo is told to stay offline. A
+# checkout has no vendor/ and builds as cargo ordinarily would.
+ifneq ($(wildcard vendor),)
+CARGO_LOCK := --frozen
+else
+CARGO_LOCK := --locked
+endif
 
 ifeq ($(TPMD_DEB_SPLIT),1)
 # The daemon that ships in the split set: the built-in floor only, everything
@@ -52,19 +63,31 @@ endif
 %:
 	dh $@ $(BACKEND_PACKAGES)
 
+# dh_clean deletes `*.orig`, `*.bak`, `*~` and the like wherever it finds them,
+# and vendor/ holds other people's crates, whose files are not ours to tidy:
+# it once deleted every crate's `Cargo.toml.orig`, which cargo then refused to
+# build without. vendor/ is input, never output, so it is left alone entirely.
+override_dh_clean:
+	dh_clean -Xvendor/
+
 # There is no build system to detect and nothing to probe that cargo does not
-# probe itself.
+# probe itself; the only configuration is where the crates come from.
 override_dh_auto_configure:
+ifneq ($(wildcard vendor),)
+	mkdir -p $(CARGO_HOME)
+	printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "%s"\n' \
+	  "$(CURDIR)/vendor" > $(CARGO_HOME)/config.toml
+endif
 
 override_dh_auto_build:
-	cargo build --release --locked --verbose $(CARGO_FEATURES) -p tpmd
+	cargo build --release $(CARGO_LOCK) --verbose $(CARGO_FEATURES) -p tpmd
 ifeq ($(TPMD_DEB_SPLIT),1)
 # One shared object per backend package. `cargo rustc --crate-type cdylib` is how
 # a shim crate — which is an ordinary library in every other build — is asked for
 # that one artefact, without a crate-type in its manifest that would make the
 # normal `cargo build --workspace` produce shared objects too.
-	cargo rustc --release --locked --verbose -p tpmd-backend-keyring-plugin --crate-type cdylib
-	cargo rustc --release --locked --verbose -p tpmd-backend-linux-tpm-plugin --crate-type cdylib
+	cargo rustc --release $(CARGO_LOCK) --verbose -p tpmd-backend-keyring-plugin --crate-type cdylib
+	cargo rustc --release $(CARGO_LOCK) --verbose -p tpmd-backend-linux-tpm-plugin --crate-type cdylib
 endif
 
 # The suite needs a session bus and a credential store, which a package build

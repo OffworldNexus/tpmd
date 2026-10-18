@@ -164,9 +164,19 @@ nothing in it.
 - The published set is three packages, not one: `tpmd` — the daemon, with only
   the guaranteed `file` floor built in — plus one package per backend, each
   shipping a `cdylib` into `/usr/lib/tpmd/backends` that the daemon finds at run
-  time. That is the `loadable-backends` build mode, and
-  `packaging/deb/build-deb.sh` is the only thing that turns it on; a plain
-  `cargo build` is still the monolith it always was.
+  time. That is the `loadable-backends` build mode, `debian/rules`' default;
+  a plain `cargo build` never reads that file and is still the monolith it
+  always was.
+- **Sources are published too, and the binaries are built from them.**
+  `packaging/deb/build-source.sh` turns a commit (a `git archive`, never the
+  working tree) into `tpmd_<version>.dsc` + one native `.tar.xz` with every
+  crate vendored; `build-deb.sh` extracts that and builds offline — CI runs it
+  under `--network none`. Two traps it handles, both of which fail the build
+  rather than the user: dpkg-source always drops `*.a`/`*.so`/`.gitignore`
+  from a native tarball, so each vendored crate's per-file checksum list is
+  emptied (its package checksum, tied to `Cargo.lock`, stays); and `dh_clean`
+  deletes `*.orig`, so it is told to leave `vendor/` alone. Try an uncommitted
+  change with `TPMD_DEB_TREE` (see the script's header).
 - **A plugin's code runs on a runtime of its own.** A plugin is a `cdylib`, so
   it links its own `tokio` and `sqlx`; a runtime context is a thread-local of
   the crate that set it, so a plugin polled on the daemon's runtime has `sqlx`
@@ -183,14 +193,11 @@ nothing in it.
     -v "$PWD:/tmp/src" -w /tmp/src tpmd-deb packaging/deb/build-deb.sh dist
   ```
 
-  Three details there are load-bearing rather than decoration:
-
-  * `--user` keeps the build from writing files your account cannot remove
-    afterwards — the image's own `CARGO_HOME` is not writable by the invoking
-    user, hence the override.
-  * the tree is mounted under `/tmp` because `dpkg-buildpackage` writes its
-    artefacts to the directory *above* the source tree, and only a
-    world-writable parent lets an unprivileged build do that.
+  `--user` is load-bearing rather than decoration: it keeps the build from
+  writing files your account cannot remove afterwards — the image's own
+  `CARGO_HOME` is not writable by the invoking user, hence the override. The
+  build itself happens in a temporary directory, never in the checkout; only
+  `dist/` is written there.
 
 - Verify an install for real (needs docker and network; installs from the
   *published* repository in a clean container per release): `packaging/deb/verify-install.sh`.

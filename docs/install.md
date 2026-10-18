@@ -194,6 +194,39 @@ To follow releases instead of nightlies, install and then hold:
 sudo apt-mark hold tpmd
 ```
 
+## Source packages
+
+Every published version has its source package beside it, in the same channel:
+
+```sh
+apt-get source tpmd                # the newest one apt knows about
+apt-get source tpmd=<version>      # the source of exactly what you installed
+```
+
+The setup script above already adds the `deb-src` line this needs. The source
+is the commit the version was stamped from, plus every Rust dependency vendored
+into `vendor/`, so it builds without the network. It is not a courtesy copy:
+the published binaries are built *from* it, offline, so a source that could not
+rebuild them would never have been published.
+
+To rebuild from it, use the same pinned toolchain the binaries were built with
+(see [below](#why-this-package-is-not-built-by-the-distribution) for why the
+distribution's own `rustc` cannot), for instance:
+
+```sh
+docker build -f packaging/deb/Dockerfile -t tpmd-deb .
+docker run --rm --network none --user "$(id -u):$(id -g)" \
+  --env CARGO_HOME=/tmp/cargo-home --env TPMD_DEB_DSC=/tmp/src/tpmd_<version>.dsc \
+  -v "$PWD:/tmp/src" -w /tmp/src/tpmd-<version> \
+  tpmd-deb packaging/deb/build-deb.sh /tmp/src/dist
+```
+
+The vendored crates keep their checksum against `Cargo.lock` but not the
+per-file lists cargo usually checks: `dpkg-source` leaves files such as `*.a`
+and `.gitignore` out of a source tarball whatever it is told, and Debian's own
+Rust packaging drops those lists for the same reason. The tarball as a whole is
+covered by the `.dsc`'s checksums, which the repository signs.
+
 ## Building the package yourself
 
 ```sh
@@ -203,9 +236,9 @@ docker run --rm --user "$(id -u):$(id -g)" --env CARGO_HOME=/tmp/cargo-home \
 ```
 
 `--user` keeps the build from writing files your account cannot remove
-afterwards, and the tree is mounted under `/tmp` because `dpkg-buildpackage`
-writes its artefacts to the directory *above* the source tree — which only
-works for an unprivileged build if that parent is world-writable.
+afterwards. The script builds the source package from the current commit first
+(`packaging/deb/build-source.sh`) and then the binaries from that source
+package, exactly as the published ones are; everything lands in `dist/`.
 
 The build runs in the *oldest* supported release (`ubuntu:22.04`) because
 whatever glibc it compiles against becomes the floor for the published binary.

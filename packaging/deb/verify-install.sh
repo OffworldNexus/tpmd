@@ -22,6 +22,9 @@
 #   4b. a backend that is a plugin is loaded and driven at run time, and
 #       removing its package removes that rung while the daemon keeps serving
 #   5. a package operation does not take the key store with it
+#   6. the source of what was installed is published: `apt-get source` fetches
+#      the same version through the `deb-src` line the setup script writes, and
+#      it is complete — every dependency vendored, the packaging with it
 #
 # Socket activation itself cannot be observed here — no container in this list
 # runs systemd as PID 1 — so it is checked with `systemd-analyze verify` and on
@@ -201,6 +204,24 @@ for image in $images; do
 		kill "$afterpid"
 		wait "$afterpid" 2>/dev/null || true
 		unset TPMD_STATE_DIR
+
+		# Step 6: the source package. Only from the published repository: a local
+		# check installs .debs and has no index to fetch a source from. apt checks
+		# what it downloads against the signed Sources index, so a fetch that
+		# succeeds is a fetch of what was signed.
+		if [ -z "${TPMD_DEB_NAME:-}" ]; then
+			installed=$(dpkg-query -W -f="\${Version}" tpmd)
+			apt-get install -y -qq --no-install-recommends dpkg-dev >/dev/null
+			mkdir -p /tmp/verify-source
+			( cd /tmp/verify-source && apt-get source -qq "tpmd=$installed" >&2 )
+			unpacked=$(find /tmp/verify-source -mindepth 1 -maxdepth 1 -type d | head -1)
+			[ -n "$unpacked" ] || { echo "apt-get source unpacked nothing" >&2; exit 1; }
+			[ "$(cd "$unpacked" && dpkg-parsechangelog -SVersion)" = "$installed" ] \
+				|| { echo "the source is not the version that was installed" >&2; exit 1; }
+			for member in Cargo.lock debian/rules vendor; do
+				[ -e "$unpacked/$member" ] || { echo "the source has no $member" >&2; exit 1; }
+			done
+		fi
 
 		# Step 5: the store is the device identity, so a package operation must
 		# not remove it. A sentinel, rather than the store this run used, so the
