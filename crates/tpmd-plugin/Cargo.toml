@@ -1,0 +1,34 @@
+[package]
+name = "tpmd-plugin"
+description = "The run-time backend-plugin boundary for the tpmd local key agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tpmd-backend.workspace = true
+# The message types a backend's methods are written in. Needed on both sides of
+# the boundary: the wrapper in `runtime` is a backend, so it names them.
+tpmd-proto.workspace = true
+# The `async_trait` macro, which the wrapper in `runtime` implements the two
+# async traits with.
+async-trait.workspace = true
+# The runtime a plugin drives its own code on. The *same* copy of `tokio` the
+# plugin's backends already link — one crate per dependency graph — which is the
+# entire point: see `runtime`.
+tokio.workspace = true
+# The host side's `dlopen`, so the hand-rolled version of it is not a thing this
+# repository owns. Optional: a plugin does not load plugins, and the normal
+# build contains neither the loader nor this dependency.
+libloading = { workspace = true, optional = true }
+
+[features]
+# The loader. Enabled by the daemon's `loadable-backends` build mode, which only
+# the packaging split turns on; a plugin itself is built without it.
+host = ["dep:libloading"]
+
+[dev-dependencies]
+tempfile.workspace = true

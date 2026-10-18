@@ -74,6 +74,36 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # The packaging split is the same crate in a different shape — no backend
+      # compiled in, a loader instead — so it is linted as its own thing rather
+      # than assumed to follow from the build above.
+      - name: Clippy (the packaging split)
+        run: >-
+          cargo clippy -p tpmd --no-default-features --features loadable-backends
+          --all-targets -- -D warnings
+
+  # The declared floor, `rust-version` in Cargo.toml. The published packages are
+  # built with the latest stable (packaging/deb/Dockerfile), so nothing else
+  # would notice a dependency or a change of ours that quietly raised it. Both
+  # build modes, because the packaging split compiles code the default does not.
+  msrv:
+    name: msrv (1.94)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.94
+        uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Check (default build)
+        env:
+          RUSTUP_TOOLCHAIN: 1.94.0
+        run: cargo check --workspace --all-targets --locked
+      - name: Check (the packaging split)
+        env:
+          RUSTUP_TOOLCHAIN: 1.94.0
+        run: >-
+          cargo check -p tpmd --no-default-features --features loadable-backends
+          --all-targets --locked
 
   deny:
     name: cargo-deny

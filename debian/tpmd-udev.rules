@@ -1,0 +1,9 @@
+# Read/write access to the TPM resource manager for the tss group, so that tpmd
+# (which runs as tss) can open a device without privileges. This is identical in
+# effect to the rule the TPM userspace packages ship, which makes it a no-op
+# where that rule is installed and a fix where it is not.
+#
+# Only /dev/tpmrm* — the resource manager — is granted. The raw /dev/tpm0 is
+# deliberately left alone: tpmd has no use for it, and granting it would widen
+# access for every member of the group.
+KERNEL=="tpmrm[0-9]*", TAG+="systemd", MODE="0660", GROUP="tss"

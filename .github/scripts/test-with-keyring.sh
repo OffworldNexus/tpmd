@@ -65,4 +65,14 @@ exec dbus-run-session -- bash -euo pipefail -c '
   done
 
   timeout --kill-after=10 '"$suite_timeout"' cargo test --workspace --all-targets
+
+  # The other build mode this project ships: the packaging split, where the daemon
+  # contains no backend above the dummy and every rung above it is a plugin loaded
+  # at run time. It has its own feature set and its own test
+  # (crates/tpmd/tests/plugin_backends.rs), which loads the *shipped* keyring shim
+  # and opens the shared store through it. Running it here, beside the keyring this
+  # script just made writable, is the difference between asserting that the rung is
+  # offered and asserting nothing at all.
+  timeout --kill-after=10 '"$suite_timeout"' \
+    cargo test -p tpmd --no-default-features --features loadable-backends --all-targets
 '

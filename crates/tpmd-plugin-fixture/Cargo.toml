@@ -1,0 +1,31 @@
+[package]
+name = "tpmd-plugin-fixture"
+description = "Test-only plugin that exercises the tpmd plugin loader against a real cdylib."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+# Exists to be built into a shared object by one test; nothing links it.
+publish = false
+
+[dependencies]
+tpmd-plugin.workspace = true
+tpmd-backend.workspace = true
+tpmd-proto.workspace = true
+# The shared store, because a plugin's real work goes through it: a fixture that
+# opens nothing cannot fail the way a real plugin fails.
+tpmd-store.workspace = true
+# …and the types its connection is spelled in, which is how every backend names
+# what `tpmd_store::open` hands back.
+sea-orm.workspace = true
+# ...and a runtime, for the same reason: a timer or a store pool needs the
+# plugin's *own* copy of `tokio` to be the one around it.
+tokio.workspace = true
+async-trait.workspace = true
+
+[features]
+# Answer with a plugin ABI number this daemon cannot speak, so the loader's
+# refusal is exercised against a real shared object rather than a mock.
+wrong-abi = []

@@ -77,7 +77,7 @@ graph TB
     u1["Daemon runs AS the user"] --> s1["Store in the user's own directory; OS permissions scope it"]
   end
   subgraph shared["Shared daemon (Linux system mode, later)"]
-    d2["One daemon runs as tss/root at /run/tpmd.sock"] --> s2["Store shared; rows carry principal;<br/>caller authenticated per connection"]
+    d2["One daemon runs as tss/root at /run/tpmd/tpmd.sock"] --> s2["Store shared; rows carry principal;<br/>caller authenticated per connection"]
   end
 ```
 
@@ -164,7 +164,7 @@ change is when a bump becomes real.
 
 | Platform | Single-user endpoint | Shared/system endpoint | Caller authentication |
 | --- | --- | --- | --- |
-| Linux | `$XDG_RUNTIME_DIR/tpmd/tpmd.sock` (dir `0700`) | `/run/tpmd.sock` | `SO_PEERCRED` |
+| Linux | `$XDG_RUNTIME_DIR/tpmd/tpmd.sock` (dir `0700`) | `/run/tpmd/tpmd.sock` | `SO_PEERCRED` |
 | macOS | `$TMPDIR/tpmd/tpmd.sock` (dir `0700`) | — | `LOCAL_PEERCRED` |
 | Windows | `\\.\pipe\tpmd-<hash-of-SID>` | — | named-pipe client token SID |
 
@@ -172,7 +172,7 @@ The `tpmd-client` **looks for the user-scoped endpoint first, then the
 system endpoint**. There is **no TCP listener**. The user-scoped endpoint lives
 in a directory only the owning user may enter (dir `0700`, socket `0600`).
 
-The **system** socket is deliberately reachable by any local user: `/run/tpmd.sock`
+The **system** socket is deliberately reachable by any local user: `/run/tpmd/tpmd.sock`
 is mode `0666`, and clients need no `tss` group membership (they never open the
 TPM). Reachability is **not** authorization — every operation is scoped to the
 caller's kernel-derived principal, so a foreign user connecting to the shared
@@ -703,7 +703,7 @@ code path.
 - **Namespace in `HELLO`.**
 - **Type name `KeyId`** = the fingerprint.
 - **Message-only signing** (the minimum Tunnel Weaver needs).
-- **Endpoint discovery**: user-scoped first, then `/run/tpmd.sock` on Linux.
+- **Endpoint discovery**: user-scoped first, then `/run/tpmd/tpmd.sock` on Linux.
 - **`describe` kept.**
 
 ## 14. Deliberately out of scope for WVR-140

@@ -45,7 +45,14 @@ pub use stream::LocalStream;
 pub const SOCKET_FILE_NAME: &str = "tpmd.sock";
 
 /// Path of the Linux system-wide socket used by a shared daemon.
-pub const SYSTEM_SOCKET_PATH: &str = "/run/tpmd.sock";
+///
+/// Inside `/run/tpmd/` rather than directly in `/run`: `/run` is `root:root
+/// 0755`, so a daemon running as an unprivileged user cannot create anything
+/// there, while a systemd `RuntimeDirectory=tpmd` hands it a directory of its
+/// own. This is the default on every Linux target — a distribution does not get
+/// a path of its own, because the path is part of the contract between client
+/// and daemon, not a packaging detail.
+pub const SYSTEM_SOCKET_PATH: &str = "/run/tpmd/tpmd.sock";
 
 /// How reachable a bound local socket is to other local users.
 ///
@@ -116,7 +123,7 @@ impl Endpoint {
 
     /// The system-wide endpoint, if the platform has one.
     ///
-    /// Linux has `/run/tpmd.sock` for a shared daemon. Windows and macOS
+    /// Linux has `/run/tpmd/tpmd.sock` for a shared daemon. Windows and macOS
     /// (per-user only) return `None`.
     pub fn system() -> Option<Endpoint> {
         #[cfg(unix)]
@@ -203,7 +210,14 @@ impl Listener {
         match endpoint {
             #[cfg(unix)]
             Endpoint::UnixSocket(path) => {
-                let listener = unix::bind(&path, access).await?;
+                // A listener handed over by the service manager wins over the
+                // path: systemd already bound it, so binding again would fail
+                // as `AlreadyExists` against ourselves, and the manager owning
+                // the socket is exactly the point of handing it over.
+                let listener = match unix::inherited_listener()? {
+                    Some(listener) => listener,
+                    None => unix::bind(&path, access).await?,
+                };
                 Ok(Listener::Unix { listener, path })
             }
             #[cfg(windows)]

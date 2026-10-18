@@ -18,6 +18,11 @@ allow = [
     "Apache-2.0",
     "MIT",
     "BSD-3-Clause",
+    # `libloading`, the `dlopen` the packaging split's plugin loader uses. ISC
+    # is the same permissive, OSI-approved family as the rest of this list; it is
+    # named separately only because nothing else in the tree is licensed that
+    # way.
+    "ISC",
     "Unicode-3.0",
     "Zlib",
 ]

@@ -44,7 +44,10 @@ enum Command {
 #[derive(Args)]
 struct BackendArgs {
     /// State directory holding the record. Defaults to the platform data dir.
-    #[arg(long)]
+    ///
+    /// The environment variable is how `/etc/default/tpmd` sets it, so this
+    /// looks where the packaged service keeps its record.
+    #[arg(long, env = "TPMD_STATE_DIR")]
     state_dir: Option<PathBuf>,
     #[command(subcommand)]
     action: Option<BackendAction>,
@@ -82,24 +85,44 @@ struct StatusArgs {
 struct ServeArgs {
     /// Endpoint to bind. On Unix, a socket path; defaults to the per-user
     /// endpoint (`$XDG_RUNTIME_DIR/tpmd/tpmd.sock` or equivalent), or the
-    /// system endpoint (`/run/tpmd.sock`) in system mode.
+    /// system endpoint (`/run/tpmd/tpmd.sock`) in system mode. A listener
+    /// inherited from a service manager, if there is one, takes precedence.
     #[arg(long)]
     socket: Option<PathBuf>,
     /// State directory for the backends. Defaults to the platform data dir,
     /// or `/var/lib/tpmd` in system mode.
-    #[arg(long)]
+    ///
+    /// The environment variable is how `/etc/default/tpmd` configures the
+    /// packaged service without the unit having to be rewritten.
+    #[arg(long, env = "TPMD_STATE_DIR")]
     state_dir: Option<PathBuf>,
+    /// Where to look for loadable backend plugins. Defaults to the packaged
+    /// directory; an absent or empty directory means no plugins at all.
+    ///
+    /// Set this for anything that is not the packaged agent. The plugins in the
+    /// packaged directory are built by the toolchain that builds the `.deb`s, and
+    /// a development build uses the one on this machine — a difference the plugin
+    /// ABI does not catch, so loading them crashes instead of refusing.
+    #[arg(long, env = "TPMD_BACKEND_DIR")]
+    backend_dir: Option<PathBuf>,
     /// Security floor advertised to clients (enforcement follows each
     /// client's request, which must opt in with `allow_below_floor`).
-    #[arg(long, default_value = "sealed", value_name = "LEVEL")]
+    ///
+    /// The environment variable is how `/etc/default/tpmd` sets it.
+    #[arg(
+        long,
+        default_value = "sealed",
+        value_name = "LEVEL",
+        env = "TPMD_MIN_SECURITY"
+    )]
     min_key_security: String,
     /// Force a specific backend by name. Fails if that backend is not built
     /// for this platform or cannot be used on this host.
     #[arg(long, value_name = "NAME")]
     backend: Option<String>,
-    /// Run as a shared system daemon: the system endpoint (`/run/tpmd.sock`),
-    /// a socket any local user may connect to (mode 0666), and the system
-    /// state directory. Defaults on when running as root.
+    /// Run as a shared system daemon: the system endpoint
+    /// (`/run/tpmd/tpmd.sock`), a socket any local user may connect to (mode
+    /// 0666), and the system state directory. Defaults on when running as root.
     #[arg(long, conflicts_with = "user")]
     system: bool,
     /// Run as a per-user daemon: the per-user endpoint (mode 0600) and the
@@ -108,12 +131,33 @@ struct ServeArgs {
     user: bool,
 }
 
+/// What the daemon logs with when nothing says otherwise.
+///
+/// The agent's own targets at `info` — see the comment where it is used for why
+/// the dependency stack is not — and everything else at `warn`.
+const DEFAULT_LOG_FILTER: &str = "warn,tpmd=info";
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
+    // Quiet by default, and loud about ourselves. The storage layer is chatty at
+    // `info`: `sqlx` logs every statement it prepares, and `sea-orm` and its
+    // migrator log every query and every migration that runs. A packaged agent's
+    // journal should say what the agent decided, not what its database executed —
+    // and the packaged service has no `RUST_LOG` set, so this is what every
+    // machine sees.
+    //
+    // The filter matches a target's *prefix*, so `tpmd=info` also covers
+    // `tpmd_backend_linux_tpm` and the rest: a backend saying which device it
+    // opened is exactly the line an operator wants, and it is the one line that
+    // explaining a ladder choice usually needs.
+    //
+    // `RUST_LOG` overrides all of it, which is the escape hatch `/etc/default/tpmd`
+    // documents; `RUST_LOG=info` is "everything, including the queries".
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER)),
         )
         .init();
 
@@ -206,11 +250,12 @@ async fn set_selection(
     // Refuse a name this build does not have: the daemon would refuse to start
     // afterwards, and better to say so now than to leave a machine that will not
     // boot its agent.
-    let factories = tpmd::registry::builtin_factories();
+    let backends = tpmd::registry::backends(&tpmd::registry::plugin_dir());
+    let factories = backends.factories();
     if !factories.iter().any(|factory| factory.name() == name) {
         eprintln!(
             "tpmd: {name} is not a backend this build has (built: {})",
-            tpmd::registry::built_names(&factories)
+            tpmd::registry::built_names(factories)
         );
         return ExitCode::FAILURE;
     }
@@ -427,6 +472,7 @@ fn serve(args: ServeArgs) -> ExitCode {
         default_min_security,
         backend: args.backend,
         socket_access,
+        plugin_dir: args.backend_dir.unwrap_or_else(tpmd::registry::plugin_dir),
     };
 
     eprintln!(
@@ -455,4 +501,52 @@ fn serve(args: ServeArgs) -> ExitCode {
     });
 
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::filter::Targets;
+
+    // The constant is at the crate root, and a module does not inherit its
+    // parent's items by bare name — which is why every test module imports what
+    // it means to use.
+    use super::DEFAULT_LOG_FILTER;
+
+    /// The default filter has to keep the backends' own lines, and it does that by
+    /// prefix: `tpmd=info` covers `tpmd_backend_linux_tpm` and every other crate of
+    /// this workspace. If that ever stopped holding, the packaged journal would
+    /// lose the line that usually explains a ladder choice — a backend saying
+    /// which device it opened — and nothing else would notice, because the daemon
+    /// would still be logging perfectly.
+    ///
+    /// Checked through `Targets`, which is the machinery `EnvFilter` consults to
+    /// decide, and the default is parsed as an `EnvFilter` as well: that
+    /// constructor panics on a directive it cannot read, so a typo fails here
+    /// instead of silently logging nothing.
+    #[test]
+    fn the_default_filter_keeps_our_own_targets_and_drops_the_storage_layers() {
+        let _ = EnvFilter::new(DEFAULT_LOG_FILTER);
+        let targets: Targets = DEFAULT_LOG_FILTER
+            .parse()
+            .expect("the default filter must be a valid directive list");
+
+        for target in ["tpmd", "tpmd_backend_linux_tpm", "tpmd_ipc", "tpmd_client"] {
+            assert!(
+                targets.would_enable(target, &tracing::Level::INFO),
+                "{target} logs at info by default: it is our code, saying what it decided"
+            );
+        }
+
+        for target in [
+            "sqlx::query",
+            "sea_orm_migration::migrator",
+            "hyper::proto::h1",
+        ] {
+            assert!(
+                !targets.would_enable(target, &tracing::Level::INFO),
+                "{target} must not reach the journal by default"
+            );
+        }
+    }
 }

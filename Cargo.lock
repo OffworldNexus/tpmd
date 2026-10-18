@@ -1720,6 +1720,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1741,6 +1751,17 @@ name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
+name = "listenfd"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b87bc54a4629b4294d0b3ef041b64c40c611097a677d9dc07b2c67739fe39dba"
+dependencies = [
+ "libc",
+ "uuid",
+ "winapi",
+]
 
 [[package]]
 name = "litemap"
@@ -3259,6 +3280,7 @@ dependencies = [
  "tpmd-backend-windows-cng",
  "tpmd-client",
  "tpmd-ipc",
+ "tpmd-plugin",
  "tpmd-proto",
  "tpmd-store",
  "tracing",
@@ -3318,6 +3340,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tpmd-backend-keyring-plugin"
+version = "0.1.0"
+dependencies = [
+ "tpmd-backend-keyring",
+ "tpmd-plugin",
+]
+
+[[package]]
 name = "tpmd-backend-linux-tpm"
 version = "0.1.0"
 dependencies = [
@@ -3336,6 +3366,14 @@ dependencies = [
  "tpmd-store",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "tpmd-backend-linux-tpm-plugin"
+version = "0.1.0"
+dependencies = [
+ "tpmd-backend-linux-tpm",
+ "tpmd-plugin",
 ]
 
 [[package]]
@@ -3408,11 +3446,37 @@ name = "tpmd-ipc"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "listenfd",
  "postcard",
  "thiserror",
  "tokio",
  "tpmd-proto",
  "windows-sys",
+]
+
+[[package]]
+name = "tpmd-plugin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "libloading",
+ "tempfile",
+ "tokio",
+ "tpmd-backend",
+ "tpmd-proto",
+]
+
+[[package]]
+name = "tpmd-plugin-fixture"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "sea-orm",
+ "tokio",
+ "tpmd-backend",
+ "tpmd-plugin",
+ "tpmd-proto",
+ "tpmd-store",
 ]
 
 [[package]]
@@ -3679,6 +3743,28 @@ name = "whoami"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "626c4bac6755d76ffc12cb01b2eac751db1996b9e0041de9aa02c8c211ddc82c"
+
+[[package]]
+name = "winapi"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419"
+dependencies = [
+ "winapi-i686-pc-windows-gnu",
+ "winapi-x86_64-pc-windows-gnu",
+]
+
+[[package]]
+name = "winapi-i686-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
+
+[[package]]
+name = "winapi-x86_64-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows-core"

@@ -1,0 +1,114 @@
+#!/usr/bin/make -f
+#
+# The Rust toolchain is supplied by the build environment rather than by a
+# build-dependency: tpmd declares rust-version = "1.94" and uses edition 2024,
+# which is newer than the rustc of most currently supported Debian-like
+# releases, and a fifth of its dependencies are not packaged as Debian crates
+# even in sid, so dh-cargo's packaged-sources build cannot be used for this
+# package. The crates come from vendor/ instead (packaging/deb/build-source.sh).
+# The Debian Rust Team's policy is nevertheless followed in shape — this file,
+# the control fields, the DEP-5 copyright, the debhelper systemd integration,
+# the /etc/default file and the man pages are what that policy asks for — and
+# docs/install.md records the deviation and its consequences.
+#
+# There are two build modes, and the difference between them is *where a backend
+# comes from*:
+#
+#   * the split (`TPMD_DEB_SPLIT=1`, the default) builds the daemon with
+#     `loadable-backends` — the dummy and nothing else — and one `cdylib` per
+#     backend to ship in its own package. It is what the repository publishes;
+#   * `TPMD_DEB_SPLIT=0` links every backend into the daemon, as a plain
+#     `cargo build` does, and ships it as the single `tpmd` package.
+#
+# The split is the default because this file is what the published source
+# package builds with: whoever rebuilds that source gets the set the repository
+# serves, not a different one. A normal `cargo build` or `cargo test --workspace`
+# never reads this file, never asks for the feature and never produces a shared
+# object, which is what keeps the ordinary build the monolith. The backend
+# packages are declared in debian/control for the split, so `TPMD_DEB_SPLIT=0`
+# excludes them from the debhelper sequence rather than shipping them empty.
+
+# The policy requires $CARGO_HOME to live inside the package build directory, so
+# that a build never writes to the building user's home.
+export CARGO_HOME := $(CURDIR)/debian/cargo-home
+# Symbols: the workspace's release profile strips the binary, and that stands
+# here. Debian's convention is for dh_strip to split them into a -dbgsym
+# package, which an archive can serve alongside its sources; a third-party
+# repository is not an archive and has nowhere sensible to publish one, so we
+# ship the stripped binary and produce none. Set
+# CARGO_PROFILE_RELEASE_STRIP=none here if that ever changes.
+
+TPMD_DEB_SPLIT ?= 1
+
+# The published source package carries every dependency in vendor/
+# (packaging/deb/build-source.sh), and a build of it must not reach the network:
+# crates.io is replaced by that directory and cargo is told to stay offline. A
+# checkout has no vendor/ and builds as cargo ordinarily would.
+ifneq ($(wildcard vendor),)
+CARGO_LOCK := --frozen
+else
+CARGO_LOCK := --locked
+endif
+
+ifeq ($(TPMD_DEB_SPLIT),1)
+# The daemon that ships in the split set: the built-in floor only, everything
+# above it loaded from the plugin directory.
+CARGO_FEATURES := --no-default-features --features loadable-backends
+BACKEND_PACKAGES :=
+else
+CARGO_FEATURES :=
+# Declared for the split, empty without it: keep them out of the sequence
+# entirely rather than build two .debs with nothing in them.
+BACKEND_PACKAGES := -Ntpmd-backend-keyring -Ntpmd-backend-linux-tpm
+endif
+
+%:
+	dh $@ $(BACKEND_PACKAGES)
+
+# dh_clean deletes `*.orig`, `*.bak`, `*~` and the like wherever it finds them,
+# and vendor/ holds other people's crates, whose files are not ours to tidy:
+# it once deleted every crate's `Cargo.toml.orig`, which cargo then refused to
+# build without. vendor/ is input, never output, so it is left alone entirely.
+override_dh_clean:
+	dh_clean -Xvendor/
+
+# There is no build system to detect and nothing to probe that cargo does not
+# probe itself; the only configuration is where the crates come from.
+override_dh_auto_configure:
+ifneq ($(wildcard vendor),)
+	mkdir -p $(CARGO_HOME)
+	printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "%s"\n' \
+	  "$(CURDIR)/vendor" > $(CARGO_HOME)/config.toml
+endif
+
+override_dh_auto_build:
+	cargo build --release $(CARGO_LOCK) --verbose $(CARGO_FEATURES) -p tpmd
+ifeq ($(TPMD_DEB_SPLIT),1)
+# One shared object per backend package. `cargo rustc --crate-type cdylib` is how
+# a shim crate — which is an ordinary library in every other build — is asked for
+# that one artefact, without a crate-type in its manifest that would make the
+# normal `cargo build --workspace` produce shared objects too.
+	cargo rustc --release $(CARGO_LOCK) --verbose -p tpmd-backend-keyring-plugin --crate-type cdylib
+	cargo rustc --release $(CARGO_LOCK) --verbose -p tpmd-backend-linux-tpm-plugin --crate-type cdylib
+endif
+
+# The suite needs a session bus and a credential store, which a package build
+# has no business providing. It runs in CI instead, on every change; see
+# .github/workflows/ci.yml.
+override_dh_auto_test:
+
+# dh_install is deliberately not used: two of the four destinations need a name
+# that differs from their source, which dh_install does not support — it reads
+# such a destination as a directory — and dh-exec would be an extra
+# build-dependency to save four lines. Placement is therefore explicit.
+override_dh_auto_install:
+	install -D -m 0755 target/release/tpmd $(CURDIR)/debian/tpmd/usr/bin/tpmd
+	install -D -m 0644 debian/tpmd.default $(CURDIR)/debian/tpmd/etc/default/tpmd
+	install -D -m 0644 debian/tpmd-udev.rules $(CURDIR)/debian/tpmd/usr/lib/udev/rules.d/60-tpmd.rules
+	install -D -m 0644 debian/sysusers.d/tpmd.conf $(CURDIR)/debian/tpmd/usr/lib/sysusers.d/tpmd.conf
+ifeq ($(TPMD_DEB_SPLIT),1)
+	install -D -m 0644 target/release/libtpmd_backend_keyring_plugin.so \
+	  $(CURDIR)/debian/tpmd-backend-keyring/usr/lib/tpmd/backends/libtpmd_backend_keyring_plugin.so
+	install -D -m 0644 target/release/libtpmd_backend_linux_tpm_plugin.so \
+	  $(CURDIR)/debian/tpmd-backend-linux-tpm/usr/lib/tpmd/backends/libtpmd_backend_linux_tpm_plugin.so
+endif

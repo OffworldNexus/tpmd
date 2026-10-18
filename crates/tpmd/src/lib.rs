@@ -59,11 +59,24 @@ pub struct Config {
     /// any local user for a shared system daemon (authorization is still
     /// per-operation, from kernel peer credentials).
     pub socket_access: SocketAccess,
+    /// Where loadable backend plugins are looked for.
+    ///
+    /// Explicit rather than read from the environment behind the daemon's back,
+    /// because the packaged directory holds plugins built by *a different
+    /// compiler* than a development build: the plugin ABI number catches a change
+    /// in shape, not in compiler, so loading those into a debug daemon does not
+    /// refuse — it crashes, with no message. A development run says where its
+    /// plugins are instead of inheriting the machine's.
+    pub plugin_dir: PathBuf,
 }
 
 /// Errors that stop the daemon entirely.
 #[derive(Debug, Error)]
 pub enum DaemonError {
+    /// The stop signals could not be watched, so the daemon could be killed
+    /// rather than asked to stop.
+    #[error("watching for a stop signal: {0}")]
+    StopSignal(std::io::Error),
     /// The shared store could not be opened, so the machine's choice cannot even
     /// be read.
     #[error("opening the store: {0}")]
@@ -134,7 +147,12 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
     let store = SelectionStore::new(db);
     let recorded = store.read().await.map_err(DaemonError::Store)?;
 
-    let factories = registry::builtin_factories();
+    // Where the factories come from is a build mode: linked in, or loaded from
+    // the plugin directory. `backends` is held for the whole run because the
+    // plugin code they point into must stay mapped while the backend opened
+    // through one may still be called.
+    let backends = registry::backends(&config.plugin_dir);
+    let factories = backends.factories();
     let (backend, recorder, stronger, skipped) = match recorded {
         Some(record) => {
             // **Sticky.** The machine has chosen; `--backend` may agree with the
@@ -150,11 +168,11 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
                 });
             }
             let backend: Arc<dyn Backend> = Arc::from(
-                registry::open_named(&factories, &record.backend, &config.state_dir).await?,
+                registry::open_named(factories, &record.backend, &config.state_dir).await?,
             );
             // What an administrator *could* adopt instead. Information: adopting
             // it re-keys the device, so it is never automatic.
-            let survey = registry::survey(&factories, &config.state_dir).await;
+            let survey = registry::survey(factories, &config.state_dir).await;
             let stronger = survey
                 .strongest()
                 .filter(|candidate| candidate.default_level() > backend.default_level())
@@ -171,7 +189,7 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
             // candidate, so a daemon that happens to start before the user
             // unlocks does not settle the machine on a plainer store.
             let chosen =
-                registry::select(&factories, &config.state_dir, config.backend.as_deref()).await?;
+                registry::select(factories, &config.state_dir, config.backend.as_deref()).await?;
             let skipped = chosen.skipped_owned();
             let backend = chosen.backend;
             let record = SelectionRecord {
@@ -212,6 +230,9 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
         "backend selected"
     );
 
+    // Before the listener, deliberately: see `StopSignals::register`.
+    let mut stop = StopSignals::register().map_err(DaemonError::StopSignal)?;
+
     let mut listener = Listener::bind(config.endpoint.clone(), config.socket_access)
         .await
         .map_err(DaemonError::Bind)?;
@@ -219,7 +240,7 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
 
     loop {
         tokio::select! {
-            _ = shutdown_signal() => {
+            _ = stop.recv() => {
                 info!("shutdown signal received");
                 break;
             }
@@ -252,13 +273,68 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
             }
         }
     }
-
-    Ok(())
+    // Then leave, without unwinding. What follows in the tidy version is the
+    // teardown, and one of those drops can block indefinitely: a backend
+    // inside a call to a store that will not answer — a keychain, a TPM, a
+    // session bus — or a plugin's own runtime still driving the task that
+    // called it. A service manager gives a stop ninety seconds, times it out
+    // and kills the process, which is a slow upgrade *and* a failed unit; no
+    // destructor is worth that on the way out. Nothing here needs one: the
+    // store commits as it goes, the selection is written when the backend is
+    // chosen, and the endpoint is systemd's under socket activation. In user
+    // mode the listener's own unlink is the one thing this skips, which is
+    // why a development run uses a fresh directory.
+    std::process::exit(0);
 }
 
-async fn shutdown_signal() {
-    // `ctrl_c` is available on all supported platforms.
-    let _ = tokio::signal::ctrl_c().await;
+/// The stop signals this process watches, registered when it is constructed.
+struct StopSignals {
+    #[cfg(unix)]
+    terminate: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    interrupt: tokio::signal::unix::Signal,
+}
+
+impl StopSignals {
+    /// Register the handlers, now, synchronously.
+    ///
+    /// Registering *is* listening, which is why this happens in `serve` before
+    /// the first slow thing rather than where the signals are awaited: a service
+    /// manager stops the running service at the moment it prepares to start the
+    /// new one, so the signal can arrive *during* start-up — while plugins load,
+    /// the store opens and migrations run. A stream created later, and re-created
+    /// on every accept, is not listening in that window: the signal is coalesced
+    /// into a stream nobody holds and never reaches this process again, and the
+    /// daemon serves on while systemd waits out its timeout and kills it.
+    ///
+    /// SIGTERM because that is what a service manager sends; SIGINT because that
+    /// is Ctrl-C, for a foreground run. `ctrl_c()` is deliberately not used: its
+    /// future registers only when it is first polled, which is the same mistake.
+    fn register() -> Result<Self, std::io::Error> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            Ok(Self {
+                terminate: signal(SignalKind::terminate())?,
+                interrupt: signal(SignalKind::interrupt())?,
+            })
+        }
+        #[cfg(not(unix))]
+        Ok(Self {})
+    }
+
+    /// Wait for either of them.
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = self.terminate.recv() => {}
+                _ = self.interrupt.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = std::future::pending::<()>().await;
+    }
 }
 
 /// Serve one connection: handshake, then the request loop.

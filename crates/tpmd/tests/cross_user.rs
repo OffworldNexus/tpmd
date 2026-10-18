@@ -55,6 +55,10 @@ async fn spawn_daemon(dir: &Path) -> Endpoint {
         endpoint: endpoint.clone(),
         state_dir: dir.to_path_buf(),
         default_min_security: SecurityLevel::Sealed,
+        // Nothing in this directory is a plugin, so the ladder is exactly the
+        // backends this build has: what this machine has installed cannot change
+        // what the test asserts on.
+        plugin_dir: dir.to_path_buf(),
         // Pin the dummy: the isolation guarantee under test is backend-agnostic,
         // and this keeps the test independent of TPM availability.
         backend: Some("dummy".to_owned()),

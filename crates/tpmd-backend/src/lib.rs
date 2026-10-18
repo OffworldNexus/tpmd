@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -277,6 +278,30 @@ pub trait Backend: Send + Sync {
 
     /// Destroy a key owned by `owner`.
     async fn destroy(&self, owner: &Owner, key_id: &KeyId) -> Result<(), BackendError>;
+}
+
+/// A backend this build knows how to construct.
+///
+/// The daemon never names a concrete backend type: it holds a factory per
+/// mechanism and asks each to [`open`](BackendFactory::open) itself. That is
+/// what lets the same selection code drive a backend compiled into the daemon
+/// and one loaded from a plugin at run time — the two differ only in where the
+/// factory came from.
+///
+/// The trait lives here, beside [`Backend`], rather than in the daemon because
+/// both sides of that boundary need it: a backend crate implements it so the
+/// daemon can be told how to build the backend, and the daemon consumes it. A
+/// backend must never depend on the daemon.
+#[async_trait]
+pub trait BackendFactory: Send + Sync {
+    /// The backend's name, as used by `--backend`, `status` and logs.
+    fn name(&self) -> &'static str;
+
+    /// Construct the backend, opening its store if it has one.
+    ///
+    /// Failing here means "unavailable on this host": the registry records the
+    /// reason and moves on rather than aborting the daemon.
+    async fn open(&self, state_dir: &Path) -> Result<Box<dyn Backend>, BackendError>;
 }
 
 /// Choose the level to provision at, honouring the caller's floor.
