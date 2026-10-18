@@ -5,11 +5,19 @@
 # artifact per architecture serve bookworm, trixie, sid, jammy, noble and
 # resolute alike.
 #
-# The Rust toolchain is installed here rather than taken from the distribution,
-# because no supported release ships a rustc new enough for this workspace
-# (rust-version = "1.98", edition 2024). Pinning it to the declared MSRV also
-# turns that declaration into something the build tests instead of something a
-# comment claims.
+# The Rust toolchain is installed here rather than taken from the distribution:
+# most supported releases ship a rustc older than this workspace's floor
+# (rust-version = "1.94"), and even where one is new enough the crates are not
+# packaged — see "Why this package is not built by the distribution" in
+# docs/install.md.
+#
+# It is the *latest stable* release, pinned to an exact version. Latest, because
+# Rust fixes its compiler and standard library — security fixes included — only
+# in new releases, so a published binary built with an old one carries every bug
+# fixed since. Pinned, so that a build is reproducible and a toolchain change is
+# a reviewed commit rather than something that happened overnight. Bump it when
+# a new stable is released. The declared floor is not tested here but by its own
+# CI job (`msrv` in .github/workflows/ci.yml), which builds with exactly 1.94.
 
 ARG BASE=ubuntu:22.04
 
@@ -17,7 +25,7 @@ FROM ${BASE}
 
 # Declared again below FROM: an ARG before FROM is only in scope for the FROM
 # instruction itself, so without this the toolchain would arrive empty here.
-ARG RUST_VERSION=1.94.0
+ARG RUST_VERSION=1.99.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -38,8 +46,8 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 # Pin the toolchain for every rustup invocation in this image. Without it rustup
 # honours the repository's `rust-toolchain.toml`, which asks for the floating
-# `stable` channel: the "built with the declared MSRV" claim would be false, and
-# rustup would try to sync stable into a RUSTUP_HOME that an unprivileged build
+# `stable` channel: the build would use whatever stable was that day rather than
+# the pinned release, and rustup would try to sync stable into a RUSTUP_HOME that an unprivileged build
 # cannot write — which is how this shows up, as an unrelated-looking EACCES.
 ENV RUSTUP_TOOLCHAIN=${RUST_VERSION}
 

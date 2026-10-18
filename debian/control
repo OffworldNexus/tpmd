@@ -9,9 +9,9 @@ Rules-Requires-Root: no
 Vcs-Git: https://github.com/OffworldNexus/tpmd.git
 Vcs-Browser: https://github.com/OffworldNexus/tpmd
 # No rustc/cargo build-dependency is declared on purpose. tpmd declares
-# rust-version = "1.94" and uses edition 2024, which is newer than the rustc in
-# every currently supported Debian-like release, so the build dependency could
-# not be satisfied anywhere. The toolchain is supplied by the build environment
+# rust-version = "1.94" and uses edition 2024, which is newer than the rustc of
+# most currently supported Debian-like releases (only sid and trixie-backports
+# reach it), so the build dependency could not be satisfied on most targets. The toolchain is supplied by the build environment
 # instead; see debian/rules and docs/install.md for what that means and what
 # would have to change for a package built in the archive.
 

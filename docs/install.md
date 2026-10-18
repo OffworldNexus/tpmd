@@ -264,13 +264,29 @@ being plain about why:
 * `Cargo.toml` declares `rust-version = "1.94"` and uses edition 2024. Edition
   2024 alone needs rustc 1.85; 1.94 is the true floor, and it belongs to the
   store's dependencies (`sea-orm`, `sqlx`) rather than to our own code.
-* Every currently supported release ships an older compiler than that floor:
-  Debian 12 has 1.63, Ubuntu 22.04 has 1.66, Ubuntu 24.04 has 1.75, and Debian 13
-  and Ubuntu 26.04 have 1.85 — which builds neither this workspace nor the
-  RustCrypto stack it depends on.
-* So a build-dependency on the toolchain could not be satisfied on any target,
-  and the binaries are built in a pinned container instead
-  (`packaging/deb/Dockerfile`), against a pinned toolchain.
+* Most supported releases ship an older compiler than that floor. Measured in
+  October 2026, newest `rustc` available per release:
+
+  | Release | rustc | ≥ 1.94 |
+  | --- | --- | --- |
+  | Debian sid | 1.97.1 | yes |
+  | Debian 13 | 1.85.1 (1.96.1 in backports) | backports only |
+  | Debian 12 | 1.63 | no |
+  | Ubuntu 26.04 | 1.93.1 | no |
+  | Ubuntu 24.04, 22.04 | 1.91 (`rustc-1.91`) | no |
+
+* The dependencies are the harder half. The policy builds against crates
+  packaged as `librust-*-dev`, and even sid lacks 63 of the 341 crates this
+  workspace builds on Linux at a compatible version — `sea-orm` and
+  `sea-orm-migration` are not packaged at all, and `secret-service` is a major
+  version behind. Closing that gap is work in the Debian archive itself, not
+  in this repository.
+* So the binaries are built in a pinned container instead
+  (`packaging/deb/Dockerfile`), with the crates vendored into the source
+  package and the **latest stable** Rust, pinned to an exact release. Not the
+  oldest that builds: Rust ships compiler and standard-library fixes, security
+  fixes among them, only in new releases. The floor is checked separately, by a
+  CI job that builds with exactly 1.94.
 
 What that costs: the published binary is trusted on our signature and the
 repository's, not on the distribution's build reproducibility. Two consequences
@@ -283,4 +299,5 @@ What it does not
 change: the packaging itself follows the policy in shape — `debian/rules`, the
 control fields, a DEP-5 `debian/copyright`, the debhelper systemd integration,
 `/etc/default`, man pages, and a package that is lintian-clean. An upload to the
-Debian archive would be blocked on the toolchain floor, not on a rewrite.
+Debian archive would be blocked on the packaged crates and, outside sid, on the
+toolchain floor — not on a rewrite of the packaging.

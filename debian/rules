@@ -2,8 +2,10 @@
 #
 # The Rust toolchain is supplied by the build environment rather than by a
 # build-dependency: tpmd declares rust-version = "1.94" and uses edition 2024,
-# which is newer than the rustc in every currently supported Debian-like
-# release, so dh-cargo's packaged-sources build cannot be used for this package.
+# which is newer than the rustc of most currently supported Debian-like
+# releases, and a fifth of its dependencies are not packaged as Debian crates
+# even in sid, so dh-cargo's packaged-sources build cannot be used for this
+# package. The crates come from vendor/ instead (packaging/deb/build-source.sh).
 # The Debian Rust Team's policy is nevertheless followed in shape — this file,
 # the control fields, the DEP-5 copyright, the debhelper systemd integration,
 # the /etc/default file and the man pages are what that policy asks for — and

@@ -36,7 +36,7 @@ Read, in order:
 
 ## Conventions
 
-- Edition **2024**, `rust-version = "1.98"`, Apache-2.0.
+- Edition **2024**, `rust-version = "1.94"`, Apache-2.0.
 - Cryptographic line matches Tunnel Weaver so signatures verify with
   `weaver_mux::auth::verify`: `p256 0.14`, `sha2`/`postcard` as pinned in the
   workspace `Cargo.toml`.
@@ -206,11 +206,16 @@ nothing in it.
 - Verify an install for real (needs docker and network; installs from the
   *published* repository in a clean container per release): `packaging/deb/verify-install.sh`.
 - **No distribution can build this package.** The workspace declares
-  `rust-version = "1.94"` and edition 2024, and every currently supported release
-  ships an older `rustc` — measured: 1.94 builds and passes the suite, 1.93 is
-  refused (`sea-orm` and `sqlx` require 1.94). `debian/` therefore follows the
-  Debian Rust Team's policy in *shape* while the binaries come from our own
-  pinned toolchain; `docs/install.md` states the deviation and its consequences.
+  `rust-version = "1.94"` (1.93 is refused: `sea-orm` and `sqlx` require 1.94);
+  only sid and trixie-backports ship a rustc that new, and even sid lacks 63 of
+  the 341 Linux crates as `librust-*-dev` at a compatible version (`sea-orm` not
+  at all). `debian/` therefore follows the Debian Rust Team's policy in *shape*
+  while the binaries come from the pinned container with vendored crates;
+  `docs/install.md` states the deviation and its consequences.
+- **The packages are built with the latest stable Rust, pinned exactly**
+  (`RUST_VERSION` in `packaging/deb/Dockerfile`; bump it when a stable ships).
+  The 1.94 floor is tested by the `msrv` job in `ci.yml`, not by the package
+  build.
 - macOS is packaged separately (`packaging/macos`, driven by fastlane). Like the
   Debian pipeline, neither runs on the push or pull-request path.
 
