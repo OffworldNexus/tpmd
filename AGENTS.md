@@ -199,6 +199,10 @@ nothing in it.
   build itself happens in a temporary directory, never in the checkout; only
   `dist/` is written there.
 
+- **Retention:** every stable release is kept; nightlies are pruned to the
+  newest seven versions by `packaging/deb/prune-nightlies.py` (the workflow's
+  `prune` job, after `verify`). Try it with `--dry-run`; it deletes whole
+  versions and never one without `~nightly`.
 - Verify an install for real (needs docker and network; installs from the
   *published* repository in a clean container per release): `packaging/deb/verify-install.sh`.
 - **No distribution can build this package.** The workspace declares

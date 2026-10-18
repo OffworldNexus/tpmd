@@ -174,10 +174,18 @@ development tool: it is built from the source tree and documented in
 ## Nightly and release versions
 
 Every build is a version. Nightly builds are stamped
-`0.1.0~nightly<YYYYMMDD>+g<commit>`, and a tagged release is its bare version
-(`0.1.0`). The tilde sorts nightlies *below* the release they lead to, so the
-first tagged release supersedes every nightly that came before it and
-`apt-get upgrade` does the right thing without argument.
+`0.1.0~nightly<YYYYMMDD>.r<run>+g<commit>`, and a tagged release is its bare
+version (`0.1.0`). The tilde sorts nightlies *below* the release they lead to, so
+the first tagged release supersedes every nightly that came before it and
+`apt-get upgrade` does the right thing without argument. The run number is what
+orders two nightlies of the same day; the commit hash alone would not.
+
+**What the repository keeps.** Every stable release, for ever. Of the nightlies,
+the newest seven *versions* — each one whole, every package and architecture and
+its source together — and older ones are deleted once a newer nightly has
+installed cleanly on every supported release. A nightly is therefore something
+to upgrade from, not something to pin: `apt-get install tpmd=<version>` of a
+nightly works for about a week. Pin a stable release instead.
 
 A `v*` tag is a release, and the same pipeline builds it: the bare version, to
 the `main` component, and — once every platform is packaging — the built

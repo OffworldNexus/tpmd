@@ -241,6 +241,23 @@ jobs:
           TPMD_VERIFY_COMPONENT: ${{ needs.version.outputs.component }}
         run: packaging/deb/verify-install.sh
 
+  # The nightly channel keeps its last seven versions; stable keeps everything.
+  # After `verify`, never before: a nightly that did not install cleanly on every
+  # release does not get to push a good one out, and the version just published
+  # is always the newest, so it is always kept. See the script for why this is
+  # not Cloudsmith's own retention rule.
+  prune:
+    name: prune old nightlies
+    if: needs.version.outputs.component == 'nightly'
+    needs: [version, verify]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Keep the newest seven nightly versions
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+        run: python3 packaging/deb/prune-nightlies.py --keep 7
+
   # A tag is a release, and a release carries artifacts. Deliberately inert for
   # now: `RELEASE_ARTIFACTS_COMPLETE` is unset, so a tag publishes to the `main`
   # component and stops there, because a release that carried only the Debian
