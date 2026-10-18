@@ -18,7 +18,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.94"
 authors = ["Offworld Nexus Authors"]
 license = "Apache-2.0"
 repository = "https://github.com/OffworldNexus/tpmd"
@@ -109,6 +109,10 @@ tempfile = "3"
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 # Unix peer-credential retrieval (SO_PEERCRED / LOCAL_PEERCRED) and file modes.
 libc = "0.2"
+# Reading the listening socket a service manager hands over with `Sockets=`
+# (systemd socket activation), so the packaged agent never binds its own path.
+# Safe API: the `from_raw_fd` this needs lives in the crate, not in ours.
+listenfd = "1.0"
 # Windows platform APIs. `Win32_Security_Cryptography` is CNG (NCrypt*), used by
 # `tpmd-backend-windows-cng` for the Platform Crypto Provider.
 windows-sys = { version = "0.61", features = [

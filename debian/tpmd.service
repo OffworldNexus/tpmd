@@ -1,0 +1,73 @@
+[Unit]
+Description=tpmd local key agent
+Documentation=man:tpmd(1)
+Documentation=https://github.com/OffworldNexus/tpmd
+Requires=tpmd.socket
+After=tpmd.socket local-fs.target
+# Bounded restarts, and in [Unit] rather than [Service]: systemd moved these two
+# keys when the rate limiter started applying to the whole unit, and a [Service]
+# placement is accepted and silently ignored — which is how a restart storm gets
+# designed in. `systemd-analyze verify` warns about it and still exits 0.
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# The TPM access user: created by the tpm2-tss stack, and by this package's
+# sysusers file where that stack is absent, so the unit never names a user that
+# may not exist. Any other choice would be root, or a group membership we cannot
+# rely on.
+User=tss
+Group=tss
+# The listener comes from systemd, not from a bind() here, which is what makes
+# the socket exist before the daemon does.
+Sockets=tpmd.socket
+# The daemon serves every local user and authorises each from kernel peer
+# credentials, so its own store is the only thing it ever writes.
+StateDirectory=tpmd
+StateDirectoryMode=0700
+Environment=TPMD_STATE_DIR=/var/lib/tpmd
+Environment=TPMD_MIN_SECURITY=sealed
+EnvironmentFile=-/etc/default/tpmd
+# --system is not implied: mode defaults to system only when the effective uid
+# is 0, which it deliberately no longer is.
+ExecStart=/usr/bin/tpmd serve --system
+# A machine whose security floor cannot be met is not a crash loop: the daemon
+# starts and refuses the individual operations, so restarting is only ever for
+# genuine faults (store open failure, contradictory --backend, bind failure).
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+
+# Hardening. The daemon holds key material and speaks to nothing but local
+# sockets, so it is given no capabilities, no network and no writable system
+# paths beyond its own state directory.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/tpmd
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# Deliberately not PrivateDevices=yes: that hands the service a minimal /dev
+# without the TPM in it, and opening a TPM is the point. The device policy and
+# the single allow entry below are what confine it instead.
+DevicePolicy=closed
+DeviceAllow=char-tpm rw
+
+[Install]
+WantedBy=multi-user.target

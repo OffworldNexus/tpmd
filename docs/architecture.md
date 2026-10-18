@@ -167,7 +167,7 @@ hardware > sealed > keyring > file
 | Concern | Linux | macOS | Windows |
 | --- | --- | --- | --- |
 | Per-user endpoint | `$XDG_RUNTIME_DIR/tpmd/tpmd.sock` | `$TMPDIR/tpmd/tpmd.sock` | `\\.\pipe\tpmd-<fnv1a-of-SID>` |
-| System endpoint | `/run/tpmd.sock`, mode `0666` | — | — |
+| System endpoint | `/run/tpmd/tpmd.sock`, mode `0666` | — | — |
 | Caller identity | `SO_PEERCRED` uid | `LOCAL_PEERCRED` uid | client token SID |
 | Store directory | `$XDG_DATA_HOME/tpmd` (or `~/.local/share/tpmd`); system mode `/var/lib/tpmd` | `~/Library/Application Support/tpmd` | `%LOCALAPPDATA%\tpmd` |
 | Store protection | dir `0700`, DB `0600`; the WAL `-wal`/`-shm` sidecars live in that directory | same | protected owner-only DACL on dir and file |
@@ -189,7 +189,7 @@ store serves many users safely. Both modes use the same code — in per-user mod
 the principal is simply constant.
 
 Mode is chosen with `--user` or `--system`, and defaults to `--system` when the
-effective uid is 0. System mode binds `/run/tpmd.sock` with mode `0666` and
+effective uid is 0. System mode binds `/run/tpmd/tpmd.sock` with mode `0666` and
 uses `/var/lib/tpmd`. **Reachability is not authorization**: the socket being
 world-connectable only means a foreign user can connect and be told
 `unknown_key`; every operation is still scoped to the caller's kernel-derived

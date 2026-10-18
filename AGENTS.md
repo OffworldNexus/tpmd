@@ -110,6 +110,40 @@ headless runners green. Note that they write a real credential (under namespace
 `tpmd-test`, destroyed again before they return): set `TPMD_TEST_KEYRING=0` to
 skip them where touching the login keyring would prompt.
 
+## Packaging
+
+- Debian/Ubuntu `.deb`, published nightly to a signed APT repository (Cloudsmith)
+  and installable with a two-line `sources.list.d` entry; the user-facing page is
+  `docs/install.md`. One artifact per architecture serves every supported release.
+- Build it through the pinned container, always — the container is the *oldest*
+  supported release, whose glibc becomes the published binary's floor:
+
+  ```sh
+  docker build -f packaging/deb/Dockerfile -t tpmd-deb .
+  docker run --rm --user "$(id -u):$(id -g)" --env CARGO_HOME=/tmp/cargo-home \
+    -v "$PWD:/tmp/src" -w /tmp/src tpmd-deb packaging/deb/build-deb.sh dist
+  ```
+
+  Three details there are load-bearing rather than decoration:
+
+  * `--user` keeps the build from writing files your account cannot remove
+    afterwards — the image's own `CARGO_HOME` is not writable by the invoking
+    user, hence the override.
+  * the tree is mounted under `/tmp` because `dpkg-buildpackage` writes its
+    artefacts to the directory *above* the source tree, and only a
+    world-writable parent lets an unprivileged build do that.
+
+- Verify an install for real (needs docker and network; installs from the
+  *published* repository in a clean container per release): `packaging/deb/verify-install.sh`.
+- **No distribution can build this package.** The workspace declares
+  `rust-version = "1.94"` and edition 2024, and every currently supported release
+  ships an older `rustc` — measured: 1.94 builds and passes the suite, 1.93 is
+  refused (`sea-orm` and `sqlx` require 1.94). `debian/` therefore follows the
+  Debian Rust Team's policy in *shape* while the binaries come from our own
+  pinned toolchain; `docs/install.md` states the deviation and its consequences.
+- macOS is packaged separately (`packaging/macos`, driven by fastlane). Like the
+  Debian pipeline, neither runs on the push or pull-request path.
+
 ## Anti-patterns
 
 - Do not trust a UID/SID claimed in a request payload: always derive it from

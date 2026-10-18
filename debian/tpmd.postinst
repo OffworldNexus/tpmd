@@ -1,0 +1,23 @@
+#!/bin/sh
+#
+# The service runs as `tss`, and systemd refuses to start a unit whose User=
+# does not resolve, so the user has to exist *before* the service is started —
+# and the service is started by the debhelper-generated tail of this very
+# script. Hence the ordering below.
+#
+# systemd-sysusers creates what is missing and never rewrites what is present,
+# so this is safe on a machine where the TPM userspace already owns the user.
+# It is skipped entirely where systemd is not installed, and a failure does not
+# fail the installation: a system where the user cannot be created is a system
+# where the service will refuse to start, which is visible in `systemctl status`
+# and does not deserve a half-configured package.
+
+set -e
+
+if [ "$1" = configure ] && command -v systemd-sysusers >/dev/null 2>&1; then
+	systemd-sysusers /usr/lib/sysusers.d/tpmd.conf || true
+fi
+
+#DEBHELPER#
+
+exit 0

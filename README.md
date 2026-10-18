@@ -15,6 +15,7 @@ the same for all of them.
 - Design and wire protocol: [`docs/protocol.md`](docs/protocol.md)
 - Architecture and custody notes: [`docs/architecture.md`](docs/architecture.md)
 - Runnable toy usage: [`docs/demo.md`](docs/demo.md)
+- Installing the package: [`docs/install.md`](docs/install.md)
 - Bootstrap decisions: [`DECISIONS.md`](DECISIONS.md)
 
 ## Workspace layout

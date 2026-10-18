@@ -17,5 +17,10 @@ postcard.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+# systemd socket activation: the packaged service is handed its listener rather
+# than binding one, so this is Linux-only, where that service manager exists.
+[target.'cfg(target_os = "linux")'.dependencies]
+listenfd.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
