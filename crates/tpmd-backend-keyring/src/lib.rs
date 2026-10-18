@@ -47,7 +47,7 @@ use p256::ecdsa::SigningKey;
 use p256::ecdsa::signature::Signer as _;
 use p256::elliptic_curve::sec1::ToSec1Point as _;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
-use tpmd_backend::{Backend, BackendError, Owner, StoreStatus, UnlockHints};
+use tpmd_backend::{Backend, BackendError, BackendFactory, Owner, StoreStatus, UnlockHints};
 use tpmd_proto::{Algorithm, KeyId, KeyInfo, SecurityLevel, Signature};
 use tpmd_store::entities::keyring_keys;
 use tpmd_store::map_db_error;
@@ -117,6 +117,26 @@ impl Access {
 fn keep_alive(store: Arc<CredentialStore>) -> &'static CredentialStore {
     let kept: &'static Arc<CredentialStore> = Box::leak(Box::new(store));
     &**kept
+}
+
+/// How the daemon constructs this backend.
+///
+/// A backend crate exposes its own factory so that the construction of a
+/// backend lives beside the backend rather than in the daemon: the daemon then
+/// has no idea whether this factory was compiled into it or loaded from a
+/// plugin, and there is exactly one place that says the backend is called
+/// `keyring`.
+pub struct KeyringFactory;
+
+#[async_trait]
+impl BackendFactory for KeyringFactory {
+    fn name(&self) -> &'static str {
+        "keyring"
+    }
+
+    async fn open(&self, state_dir: &Path) -> Result<Box<dyn Backend>, BackendError> {
+        Ok(Box::new(KeyringBackend::open(state_dir).await?))
+    }
 }
 
 /// A software P-256 store whose scalars live in the OS credential store.

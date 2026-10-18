@@ -74,6 +74,13 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # The packaging split is the same crate in a different shape — no backend
+      # compiled in, a loader instead — so it is linted as its own thing rather
+      # than assumed to follow from the build above.
+      - name: Clippy (the packaging split)
+        run: >-
+          cargo clippy -p tpmd --no-default-features --features loadable-backends
+          --all-targets -- -D warnings
 
   deny:
     name: cargo-deny

@@ -8,6 +8,12 @@ use std::process::Command;
 #[test]
 fn an_unbuilt_backend_is_rejected_and_the_alternatives_named() {
     let output = Command::new(env!("CARGO_BIN_EXE_tpmd"))
+        // Not this machine's plugins: an install in the packaged
+        // directory would change the ladder this test asserts on.
+        .env(
+            "TPMD_BACKEND_DIR",
+            std::env::temp_dir().join("tpmd-e2e-no-backends"),
+        )
         .args([
             "serve",
             "--backend",
@@ -32,6 +38,12 @@ fn an_unbuilt_backend_is_rejected_and_the_alternatives_named() {
 #[test]
 fn invalid_arguments_are_reported_without_starting() {
     let output = Command::new(env!("CARGO_BIN_EXE_tpmd"))
+        // Not this machine's plugins: an install in the packaged
+        // directory would change the ladder this test asserts on.
+        .env(
+            "TPMD_BACKEND_DIR",
+            std::env::temp_dir().join("tpmd-e2e-no-backends"),
+        )
         .args(["serve", "--min-key-security", "nonsense"])
         .output()
         .expect("running tpmd");

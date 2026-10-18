@@ -16,6 +16,14 @@
 # The committed changelog is left exactly as it was found: a generated entry is
 # prepended for the build and removed again on exit.
 
+# The split build mode, turned on here and nowhere else: the daemon is built
+# with `loadable-backends` (so it loads its backends from /usr/lib/tpmd/backends
+# rather than linking them in) and one shared object is built per backend
+# package. A plain `cargo build` asks for neither, which is what keeps the normal
+# build the monolith it has always been. See debian/rules.
+TPMD_DEB_SPLIT=1
+export TPMD_DEB_SPLIT
+
 set -eu
 
 out=${1:-dist}
@@ -86,8 +94,10 @@ printf 'building tpmd %s for %s\n' "$version" "$(dpkg-architecture -qDEB_HOST_AR
 dpkg-buildpackage --build=binary --no-sign --unsigned-source
 
 # The binaries land next to the source tree, which is dpkg's convention and not
-# ours; collect them where the caller asked.
-find .. -maxdepth 1 -name 'tpmd_*.deb' -exec mv {} "$out" \;
+# ours; collect them where the caller asked. The pattern covers every package in
+# the set, not just the daemon: `tpmd_*` silently dropped the backend packages,
+# which then never reached the repository while every check still passed.
+find .. -maxdepth 1 -name 'tpmd*.deb' -exec mv {} "$out" \;
 
 printf 'artifacts:\n'
 ls -l "$out"

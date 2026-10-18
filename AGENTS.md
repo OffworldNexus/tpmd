@@ -28,6 +28,9 @@ Read, in order:
 | `tpmd-backend-windows-cng` | Windows CNG Platform Crypto Provider store (level `hardware`); one `unsafe` FFI module. |
 | `tpmd-ipc` | Local endpoints, caller auth, secure filesystem, framed I/O. |
 | `tpmd` | The daemon, its backend registry and its CLI. |
+| `tpmd-plugin` | The run-time plugin boundary: the `dlopen` loader (host side) and the runtime a plugin's own code runs on. |
+| `tpmd-backend-*-plugin` | The two `cdylib` shims the Debian split ships, one per backend package; an ordinary library in every other build. |
+| `tpmd-plugin-fixture` | Test-only plugin, so the loader and the boundary are exercised against a real shared object. |
 | `tpmd-client` | Consumer API. |
 | `tpmd-demo` | Toy consumer. |
 
@@ -37,10 +40,14 @@ Read, in order:
 - Cryptographic line matches Tunnel Weaver so signatures verify with
   `weaver_mux::auth::verify`: `p256 0.14`, `sha2`/`postcard` as pinned in the
   workspace `Cargo.toml`.
-- `#![forbid(unsafe_code)]` everywhere except two deliberately scoped FFI
+- `#![forbid(unsafe_code)]` everywhere except three deliberately scoped
   modules, each reviewed as a unit: `tpmd-ipc`'s Windows module (`winutil`, for
-  pipe DACLs and peer SIDs) and `tpmd-backend-windows-cng`'s `ffi` module (for
-  CNG/NCrypt). Nothing else may use `unsafe`.
+  pipe DACLs and peer SIDs), `tpmd-backend-windows-cng`'s `ffi` module (for
+  CNG/NCrypt) and `tpmd-plugin`'s `host` module — the `dlopen` by which the
+  packaging split loads a backend, which is a privilege decision rather than a
+  parsing one, because mapping a file runs its code as this process. The shim
+  and fixture crates use `deny` rather than `forbid` for their one generated
+  `unsafe(no_mangle)` entry point. Nothing else may use `unsafe`.
 - Every public item is documented (`#![warn(missing_docs)]`); comments explain
   **why**, not what.
 - Backends are one crate per mechanism, gated so a build for one OS never
@@ -54,6 +61,9 @@ Read, in order:
 ## Testing
 
 - Full suite (fast): `cargo test --workspace --all-targets -q` (~1s warm; sub-second test execution once built, timeout 900000ms).
+- The packaging split's build mode is a different feature set with tests of
+  its own: `cargo test -p tpmd --no-default-features --features loadable-backends
+  --all-targets -q` (~10s). CI runs it, and clippy over it, on Linux.
 - Single crate: `cargo test -p tpmd-proto -q` (~10s, timeout 120000ms).
 - Single test: `cargo test -p tpmd --test daemon <name> -q` (~5s, timeout 120000ms).
 - Static analysis, in order:
@@ -110,11 +120,60 @@ headless runners green. Note that they write a real credential (under namespace
 `tpmd-test`, destroyed again before they return): set `TPMD_TEST_KEYRING=0` to
 skip them where touching the login keyring would prompt.
 
+## Running a development build alongside the installed agent
+
+The packages install a working agent, and a development build has to stay out of
+its way. Three things are never shared:
+
+| | The installed agent | A development build |
+| --- | --- | --- |
+| socket | `/run/tpmd/tpmd.sock`, created by `tpmd.socket` | `--socket /tmp/tpmd-dev/tpmd.sock` |
+| state | `/var/lib/tpmd`, a real device identity | `--state-dir /tmp/tpmd-dev/state` |
+| plugins | `/usr/lib/tpmd/backends`, from the `.deb`s | `--backend-dir` (or `TPMD_BACKEND_DIR`) |
+
+```sh
+mkdir -p /tmp/tpmd-dev
+cargo run -p tpmd -- serve --user \
+  --socket /tmp/tpmd-dev/tpmd.sock --state-dir /tmp/tpmd-dev/state \
+  --backend-dir /tmp/tpmd-dev/backends --min-key-security file
+```
+
+`--user` because it is not root's agent, and a directory of its own because
+binding a socket in the packaged paths is not a development build's business. A
+`--backend-dir` that does not exist means no plugins, which is the honest answer
+for a monolith build: that build links its backends in and never reads the
+directory at all. To exercise a *split* build, put its own plugins there first —
+`cp target/debug/libtpmd_backend_*_plugin.so /tmp/tpmd-dev/backends/`.
+
+The third row is the one that bites. The packaged plugins are built by the pinned
+container's toolchain and a debug build by the toolchain on this machine, and the
+plugin ABI number catches a change in *shape*, not in *compiler* (see
+`tpmd-plugin`'s module docs). Loading one into the other therefore does not
+refuse: the daemon dies of a `SIGSEGV` with no message, which is also what a test
+looks like when it inherits the machine's plugins. That is why `Config` carries
+`plugin_dir` rather than letting the loader read the environment behind the
+daemon's back, and why the tests that run a daemon point it at a directory with
+nothing in it.
+
+
 ## Packaging
 
 - Debian/Ubuntu `.deb`, published nightly to a signed APT repository (Cloudsmith)
   and installable with a two-line `sources.list.d` entry; the user-facing page is
   `docs/install.md`. One artifact per architecture serves every supported release.
+- The published set is three packages, not one: `tpmd` — the daemon, with only
+  the guaranteed `file` floor built in — plus one package per backend, each
+  shipping a `cdylib` into `/usr/lib/tpmd/backends` that the daemon finds at run
+  time. That is the `loadable-backends` build mode, and
+  `packaging/deb/build-deb.sh` is the only thing that turns it on; a plain
+  `cargo build` is still the monolith it always was.
+- **A plugin's code runs on a runtime of its own.** A plugin is a `cdylib`, so
+  it links its own `tokio` and `sqlx`; a runtime context is a thread-local of
+  the crate that set it, so a plugin polled on the daemon's runtime has `sqlx`
+  abort the whole process — "this functionality requires a Tokio context", then
+  an abort out of a `cdylib` frame, where the panic is no longer catchable.
+  `tpmd-plugin` wraps every factory so this cannot be forgotten; see
+  `tpmd-plugin::runtime` and the tests that assert it.
 - Build it through the pinned container, always — the container is the *oldest*
   supported release, whose glibc becomes the published binary's floor:
 
@@ -164,3 +223,12 @@ skip them where touching the login keyring would prompt.
 - Do not answer "not now" with `REJECT`. It closes the socket and is reserved for
   the fatal cases; a closed store is answered with the non-fatal `CLOSED`, which
   is the only refusal that keeps the connection.
+- Do not point a development build at `/usr/lib/tpmd/backends`, and do not let a
+  test inherit it. The ABI number matches while the compilers differ, so the
+  failure is a `SIGSEGV` in the agent rather than an error anyone can read. See
+  *Running a development build alongside the installed agent*.
+- Do not drive a plugin's own code on the daemon's runtime, and do not export a
+  factory with anything but `tpmd_plugin::export_backend!`. The two copies of
+  `tokio` in the process have separate thread-locals, and the failure is an
+  abort of the agent rather than an error a caller could see. See
+  `tpmd-plugin::runtime`.

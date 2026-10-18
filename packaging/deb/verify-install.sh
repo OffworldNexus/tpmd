@@ -12,11 +12,15 @@
 # published for all of them, and this is what proves that claim.
 #
 # What each release is checked for:
-#   1. the repository signs and resolves (the documented setup path, verbatim)
+#   1. the repository signs and resolves (the documented setup path, verbatim),
+#      and the split arrives with it — every backend package, and the plugins in
+#      /usr/lib/tpmd/backends
 #   2. the shipped binaries run at all — the glibc floor, which is the only
 #      thing that can differ between a build host and an install host
 #   3. the service and socket definitions are valid for that release's systemd
 #   4. the daemon serves and the toy consumer completes a full life cycle
+#   4b. a backend that is a plugin is loaded and driven at run time, and
+#       removing its package removes that rung while the daemon keeps serving
 #   5. a package operation does not take the key store with it
 #
 # Socket activation itself cannot be observed here — no container in this list
@@ -30,7 +34,9 @@ repo=${CLOUDSMITH_REPO:-apt}
 base="https://dl.cloudsmith.io/public/${owner}/${repo}"
 
 # A locally built .deb can be checked without a published repository, which is
-# what makes this runnable before the first publish and on a pull request:
+# what makes this runnable before the first publish and on a pull request. The
+# whole directory is installed, because the split set is three packages and a
+# check that installs one of them is not checking the split:
 #
 #   TPMD_DEB=dist/tpmd_0.1.0_amd64.deb packaging/deb/verify-install.sh
 #
@@ -83,16 +89,32 @@ for image in $images; do
 		apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg systemd >/dev/null
 
 		# Step 1: install the package the way a user would — from the published
-		# repository, or from a local file when one was named. The component is
-		# the channel: `main` is what the setup script configures by default, and
-		# a nightly lives in `nightly`, so the check has to ask for it.
+		# repository, or from the local packages when they were named. The
+		# component is the channel: `main` is what the setup script configures by
+		# default, and a nightly lives in `nightly`, so the check has to ask for
+		# it.
 		if [ -n "${TPMD_DEB_NAME:-}" ]; then
-			apt-get install -y -qq "/debs/${TPMD_DEB_NAME}" >&2
+			apt-get install -y -qq /debs/*.deb >&2
 		else
 			curl -1sLf "'"$base"'/cfg/setup/bash.deb.sh" \
 				| distro='"$distro"' codename='"$codename"' component='"${TPMD_VERIFY_COMPONENT:-main}"' bash
 			apt-get update -qq
 			apt-get install -y -qq tpmd >&2
+		fi
+
+		# Step 1b: the split. The backends above the built-in floor are their own
+		# packages, shipped as plugins and recommended by `tpmd`, so a plain
+		# install has the whole ladder. Both derivations are checked — the
+		# Recommends this repository serves, and the local files — because a split
+		# whose pieces do not arrive together is a split nobody has.
+		dpkg -s tpmd-backend-keyring tpmd-backend-linux-tpm >/dev/null
+		for so in libtpmd_backend_keyring_plugin.so libtpmd_backend_linux_tpm_plugin.so; do
+			[ -f "/usr/lib/tpmd/backends/$so" ] || { echo "missing plugin: $so" >&2; exit 1; }
+		done
+		# …and the package that carries the daemon no longer carries them.
+		if dpkg -L tpmd | grep -q '^/usr/lib/tpmd/backends/'; then
+			echo "tpmd still ships a backend plugin" >&2
+			exit 1
 		fi
 
 		# Step 2: the binaries run on this release at all.
@@ -132,6 +154,53 @@ for image in $images; do
 		# is for is that the package installs and runs on this release.
 		kill "$pid"
 		wait "$pid" 2>/dev/null || true
+
+		# Step 4b: the split really works. A plugin backend is only knowable once
+		# it has been loaded — the daemon has no compiled-in idea that a backend
+		# called `keyring` exists — so a daemon that *serves* as keyring is proof
+		# that the shared object was found, mapped and driven. Nothing is forced
+		# here: the store is unreachable in a container, and the daemon is
+		# deliberately willing to run the backend of a store that is reachable but
+		# unusable, so that the refusal can say why (WVR-151/152).
+		export TPMD_STATE_DIR=/tmp/verify-split
+		tpmd serve --backend keyring --min-key-security file \
+			--socket /tmp/verify-split.sock &
+		splitpid=$!
+		for _ in $(seq 1 50); do
+			[ -S /tmp/verify-split.sock ] && break
+			sleep 0.1
+		done
+		tpmd status --socket /tmp/verify-split.sock
+		tpmd status --socket /tmp/verify-split.sock | grep -q '^backend *: keyring' \
+			|| { echo "the keyring plugin was not loaded" >&2; exit 1; }
+		kill "$splitpid"
+		wait "$splitpid" 2>/dev/null || true
+
+		# Step 4c: removing one backend package removes that rung and leaves the
+		# daemon running on another. The daemon offers exactly what is installed,
+		# so the name is refused once its package is gone — and the built-in
+		# floor keeps serving, which is the whole reason the dummy stayed in the
+		# daemon rather than moving into a package.
+		rm -rf /tmp/verify-split
+		apt-get remove -y -qq tpmd-backend-keyring >&2
+		if tpmd backend --state-dir /tmp/verify-split set keyring --yes 2>/dev/null; then
+			echo "the keyring rung was still offered after its package was removed" >&2
+			exit 1
+		fi
+		tpmd backend --state-dir /tmp/verify-split set dummy --yes >/dev/null
+		rm -rf /tmp/verify-split-after
+		tpmd serve --backend dummy --min-key-security file \
+			--socket /tmp/verify-after.sock --state-dir /tmp/verify-split-after &
+		afterpid=$!
+		for _ in $(seq 1 50); do
+			[ -S /tmp/verify-after.sock ] && break
+			sleep 0.1
+		done
+		tpmd status --socket /tmp/verify-after.sock | grep -q '^backend *: dummy' \
+			|| { echo "the daemon did not keep serving after a backend was removed" >&2; exit 1; }
+		kill "$afterpid"
+		wait "$afterpid" 2>/dev/null || true
+		unset TPMD_STATE_DIR
 
 		# Step 5: the store is the device identity, so a package operation must
 		# not remove it. A sentinel, rather than the store this run used, so the

@@ -1,10 +1,16 @@
 # Installing tpmd
 
-`tpmd` is published as a Debian package from a signed APT repository, built
-nightly for every currently supported Debian-like release. One package serves
-them all: the daemon's only runtime dependency is glibc, so a single artifact
-per architecture installs and runs from Debian 12 through sid and from Ubuntu
-22.04 through 26.04.
+`tpmd` is published as Debian packages from a signed APT repository, two
+channels deep, built nightly for every currently supported Debian-like
+release. One artifact per architecture serves them all: the daemon's only
+runtime dependency is glibc, so a single build installs and runs from Debian
+12 through sid and from Ubuntu 22.04 through 26.04.
+
+The published set is the agent plus one package per backend above the built-in
+floor. Installing `tpmd` brings the whole ladder with it — the backend
+packages are recommended rather than required, so
+`apt-get install --no-install-recommends tpmd` gives the agent alone, which
+serves at `file` and refuses what it cannot protect.
 
 ## Install
 
@@ -47,6 +53,13 @@ the daemon, so it is worth understanding before changing anything; see
 | `/usr/lib/udev/rules.d/60-tpmd.rules` | gives `tss` access to `/dev/tpmrm*` |
 | `/var/lib/tpmd/keys.sqlite` | the key store — **the device identity** |
 | `/run/tpmd/tpmd.sock` | the endpoint clients connect to |
+| `/usr/lib/tpmd/backends/*.so` | the backends above the floor, one file per backend package |
+
+The last line is the split. `tpmd-backend-keyring` and
+`tpmd-backend-linux-tpm` each own one shared object, and the agent loads
+whatever it finds there when it starts: a machine that never installs one
+simply has a shorter ladder, and removing one removes exactly that rung
+without touching the agent's own files.
 
 The socket is created by systemd (`tpmd.socket`), not by the daemon: it exists
 before the service starts, so a client reaching a cold machine is answered once

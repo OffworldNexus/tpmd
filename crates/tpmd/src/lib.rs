@@ -59,6 +59,15 @@ pub struct Config {
     /// any local user for a shared system daemon (authorization is still
     /// per-operation, from kernel peer credentials).
     pub socket_access: SocketAccess,
+    /// Where loadable backend plugins are looked for.
+    ///
+    /// Explicit rather than read from the environment behind the daemon's back,
+    /// because the packaged directory holds plugins built by *a different
+    /// compiler* than a development build: the plugin ABI number catches a change
+    /// in shape, not in compiler, so loading those into a debug daemon does not
+    /// refuse — it crashes, with no message. A development run says where its
+    /// plugins are instead of inheriting the machine's.
+    pub plugin_dir: PathBuf,
 }
 
 /// Errors that stop the daemon entirely.
@@ -138,7 +147,12 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
     let store = SelectionStore::new(db);
     let recorded = store.read().await.map_err(DaemonError::Store)?;
 
-    let factories = registry::builtin_factories();
+    // Where the factories come from is a build mode: linked in, or loaded from
+    // the plugin directory. `backends` is held for the whole run because the
+    // plugin code they point into must stay mapped while the backend opened
+    // through one may still be called.
+    let backends = registry::backends(&config.plugin_dir);
+    let factories = backends.factories();
     let (backend, recorder, stronger, skipped) = match recorded {
         Some(record) => {
             // **Sticky.** The machine has chosen; `--backend` may agree with the
@@ -154,11 +168,11 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
                 });
             }
             let backend: Arc<dyn Backend> = Arc::from(
-                registry::open_named(&factories, &record.backend, &config.state_dir).await?,
+                registry::open_named(factories, &record.backend, &config.state_dir).await?,
             );
             // What an administrator *could* adopt instead. Information: adopting
             // it re-keys the device, so it is never automatic.
-            let survey = registry::survey(&factories, &config.state_dir).await;
+            let survey = registry::survey(factories, &config.state_dir).await;
             let stronger = survey
                 .strongest()
                 .filter(|candidate| candidate.default_level() > backend.default_level())
@@ -175,7 +189,7 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
             // candidate, so a daemon that happens to start before the user
             // unlocks does not settle the machine on a plainer store.
             let chosen =
-                registry::select(&factories, &config.state_dir, config.backend.as_deref()).await?;
+                registry::select(factories, &config.state_dir, config.backend.as_deref()).await?;
             let skipped = chosen.skipped_owned();
             let backend = chosen.backend;
             let record = SelectionRecord {

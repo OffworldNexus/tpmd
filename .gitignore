@@ -47,3 +47,10 @@ packaging/build/
 /debian/*.debhelper
 /debian/*.substvars
 /debian/*-build-stamp
+# The split stages one directory per package beside the control files, so the
+# pattern has to be here before the first split build rather than after it.
+/debian/tpmd-*/
+
+# The Cloudsmith CLI leaves its own logs in the working directory on a push, and
+# they are root-owned when a containerised build pushed; never ours to commit.
+.csm_*

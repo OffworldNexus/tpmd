@@ -1720,6 +1720,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3270,6 +3280,7 @@ dependencies = [
  "tpmd-backend-windows-cng",
  "tpmd-client",
  "tpmd-ipc",
+ "tpmd-plugin",
  "tpmd-proto",
  "tpmd-store",
  "tracing",
@@ -3329,6 +3340,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tpmd-backend-keyring-plugin"
+version = "0.1.0"
+dependencies = [
+ "tpmd-backend-keyring",
+ "tpmd-plugin",
+]
+
+[[package]]
 name = "tpmd-backend-linux-tpm"
 version = "0.1.0"
 dependencies = [
@@ -3347,6 +3366,14 @@ dependencies = [
  "tpmd-store",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "tpmd-backend-linux-tpm-plugin"
+version = "0.1.0"
+dependencies = [
+ "tpmd-backend-linux-tpm",
+ "tpmd-plugin",
 ]
 
 [[package]]
@@ -3425,6 +3452,31 @@ dependencies = [
  "tokio",
  "tpmd-proto",
  "windows-sys",
+]
+
+[[package]]
+name = "tpmd-plugin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "libloading",
+ "tempfile",
+ "tokio",
+ "tpmd-backend",
+ "tpmd-proto",
+]
+
+[[package]]
+name = "tpmd-plugin-fixture"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "sea-orm",
+ "tokio",
+ "tpmd-backend",
+ "tpmd-plugin",
+ "tpmd-proto",
+ "tpmd-store",
 ]
 
 [[package]]

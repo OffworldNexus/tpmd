@@ -35,6 +35,10 @@ fn config(dir: &Path, backend: Option<&str>) -> tpmd::Config {
         endpoint: test_endpoint(dir),
         state_dir: dir.to_path_buf(),
         default_min_security: SecurityLevel::Sealed,
+        // Nothing in this directory is a plugin, so the ladder is exactly the
+        // backends this build has: what this machine has installed cannot change
+        // what the test asserts on.
+        plugin_dir: dir.to_path_buf(),
         backend: backend.map(str::to_owned),
         socket_access: SocketAccess::Owner,
     }
@@ -228,6 +232,12 @@ async fn an_unknown_backend_is_refused_before_it_is_recorded() {
 /// Run the installed binary's `backend` verb against a state directory.
 fn cli(state_dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_tpmd"))
+        // Not this machine's plugins: an install in the packaged
+        // directory would change the ladder this test asserts on.
+        .env(
+            "TPMD_BACKEND_DIR",
+            std::env::temp_dir().join("tpmd-e2e-no-backends"),
+        )
         .arg("backend")
         .arg("--state-dir")
         .arg(state_dir)

@@ -96,6 +96,15 @@ struct ServeArgs {
     /// packaged service without the unit having to be rewritten.
     #[arg(long, env = "TPMD_STATE_DIR")]
     state_dir: Option<PathBuf>,
+    /// Where to look for loadable backend plugins. Defaults to the packaged
+    /// directory; an absent or empty directory means no plugins at all.
+    ///
+    /// Set this for anything that is not the packaged agent. The plugins in the
+    /// packaged directory are built by the toolchain that builds the `.deb`s, and
+    /// a development build uses the one on this machine — a difference the plugin
+    /// ABI does not catch, so loading them crashes instead of refusing.
+    #[arg(long, env = "TPMD_BACKEND_DIR")]
+    backend_dir: Option<PathBuf>,
     /// Security floor advertised to clients (enforcement follows each
     /// client's request, which must opt in with `allow_below_floor`).
     ///
@@ -241,11 +250,12 @@ async fn set_selection(
     // Refuse a name this build does not have: the daemon would refuse to start
     // afterwards, and better to say so now than to leave a machine that will not
     // boot its agent.
-    let factories = tpmd::registry::builtin_factories();
+    let backends = tpmd::registry::backends(&tpmd::registry::plugin_dir());
+    let factories = backends.factories();
     if !factories.iter().any(|factory| factory.name() == name) {
         eprintln!(
             "tpmd: {name} is not a backend this build has (built: {})",
-            tpmd::registry::built_names(&factories)
+            tpmd::registry::built_names(factories)
         );
         return ExitCode::FAILURE;
     }
@@ -462,6 +472,7 @@ fn serve(args: ServeArgs) -> ExitCode {
         default_min_security,
         backend: args.backend,
         socket_access,
+        plugin_dir: args.backend_dir.unwrap_or_else(tpmd::registry::plugin_dir),
     };
 
     eprintln!(
