@@ -126,6 +126,7 @@ jobs:
           PY
           )
           pending=$(printf '%s\n' "$count" | tail -1)
+          pending=${pending:-0}
           printf '%s\n' "$count" | sed '$d' | tee /tmp/vulnerabilities.txt
           echo "pending=$pending" >> "$GITHUB_OUTPUT"
 
