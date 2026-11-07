@@ -199,13 +199,14 @@ Backlog with a comment naming this release as the reason they were deferred.
 The hourly `security` workflow (`.github/workflows/security.yml`) is the normal
 way a patch release happens:
 
-1. It runs `cargo deny` against a strict config that ignores nothing.
+1. It runs `cargo deny` against a strict config that drops every `TEMPORARY`
+   acceptance (the permanent unmaintained-crate ignores stay).
 2. If an advisory is found, it runs headless OpenCode with the OpenRouter model
    to update the affected dependencies and to remove any temporary ignores from
    `deny.toml`.
 3. It runs the test suite, opens and merges a branch through a PR, bumps the
-   workspace version to the next patch, tags `vX.Y.Z`, and dispatches the
-   packaging workflow on the tag.
+   workspace version to the next patch, tags `vX.Y.Z`, and lets the tag push
+   start the normal packaging workflow.
 4. The release notes come from the tag message, which lists the RUSTSEC IDs and
    the dependency changes.
 
