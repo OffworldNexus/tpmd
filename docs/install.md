@@ -202,6 +202,31 @@ To follow releases instead of nightlies, install and then hold:
 sudo apt-mark hold tpmd
 ```
 
+## Alternative APT repository (Forgejo)
+
+The same packages are mirrored to the Debian registry of our Forgejo instance,
+with the same two channels — `main` for releases, `nightly` for nightlies — and
+the same distribution that serves every release, so a machine installs from it
+exactly the way it does from Cloudsmith:
+
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo curl -1sLf https://forge.offworld.nexus/api/packages/OffworldNexus/debian/repository.key \
+  -o /etc/apt/keyrings/forgejo-offworldnexus.asc
+echo "deb [signed-by=/etc/apt/keyrings/forgejo-offworldnexus.asc] https://forge.offworld.nexus/api/packages/OffworldNexus/debian any-distro nightly" \
+  | sudo tee /etc/apt/sources.list.d/tpmd-forgejo.list
+sudo apt-get update
+sudo apt-get install tpmd
+```
+
+Swap `nightly` for `main` to follow releases instead. Both repositories can be
+configured at the same time: the versions are identical, so which one apt
+resolves to does not change what is installed.
+
+One difference is worth knowing: the mirror serves binaries only. Forgejo's
+Debian registry has no source index, so `apt-get source tpmd` and the `deb-src`
+line above stay a Cloudsmith capability.
+
 ## Source packages
 
 Every published version has its source package beside it, in the same channel:
