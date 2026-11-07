@@ -158,9 +158,22 @@ nothing in it.
 
 ## Packaging
 
-- Debian/Ubuntu `.deb`, published nightly to a signed APT repository (Cloudsmith)
-  and installable with a two-line `sources.list.d` entry; the user-facing page is
-  `docs/install.md`. One artifact per architecture serves every supported release.
+- Debian/Ubuntu `.deb`, published nightly to two signed APT repositories —
+  Cloudsmith (primary) and the Forgejo mirror — and installable with a
+  `sources.list.d` entry; the user-facing page is `docs/install.md`. One
+  artifact per architecture serves every supported release. As of 0.1 APT is
+  the whole distribution: there is no RPM, Arch, Windows or macOS package yet.
+- **Releasing** is tag-driven and automated; follow `docs/releasing.md` exactly.
+  A `vX.Y.Z` annotated tag whose message becomes the release notes, on a commit
+  whose workspace version is `X.Y.Z`, is the only input. The workflow builds,
+  publishes to both repositories, installs from each in a clean container per
+  supported release, then creates the GitHub release with the artifacts and a
+  `SHA256SUMS`. Never move or reuse a tag.
+- **Security patches** are produced by `.github/workflows/security.yml`, which
+  runs hourly: it checks `cargo deny` against a config that ignores nothing and,
+  when an advisory is fixable, runs headless OpenCode to update the dependencies
+  and remove temporary ignores, then cuts the next patch release through the
+  normal tag pipeline. Do not paper over an advisory with a permanent ignore.
 - The published set is three packages, not one: `tpmd` — the daemon, with only
   the guaranteed `file` floor built in — plus one package per backend, each
   shipping a `cdylib` into `/usr/lib/tpmd/backends` that the daemon finds at run
@@ -200,9 +213,10 @@ nothing in it.
   `dist/` is written there.
 
 - **Retention:** every stable release is kept; nightlies are pruned to the
-  newest seven versions by `packaging/deb/prune-nightlies.py` (the workflow's
-  `prune` job, after `verify`). Try it with `--dry-run`; it deletes whole
-  versions and never one without `~nightly`.
+  newest seven versions by `packaging/deb/prune-nightlies.py` on Cloudsmith and
+  `packaging/deb/prune-forgejo-nightlies.py` on the mirror (the workflow's
+  `prune` and `prune-forgejo` jobs, after `verify`). Try them with `--dry-run`;
+  they delete whole versions and never one without `~nightly`.
 - Verify an install for real (needs docker and network; installs from the
   *published* repository in a clean container per release): `packaging/deb/verify-install.sh`.
 - **No distribution can build this package.** The workspace declares

@@ -1,9 +1,15 @@
 name: deb packages
 
-# Nightly .deb builds for every currently supported Debian-like release, pushed
-# to the signed APT repository on Cloudsmith (see docs/install.md). Nothing here
-# runs on the push or pull-request path: the test suite and static analysis live
-# in ci.yml, and this workflow exists to publish, not to gate.
+# Nightly .deb builds for every currently supported Debian-like release, and
+# tagged stable releases, pushed to the signed APT repositories on Cloudsmith
+# and the Forgejo mirror (see docs/install.md). Nothing here runs on the push or
+# pull-request path: the test suite and static analysis live in ci.yml, and this
+# workflow exists to publish, not to gate.
+#
+# A `v*` tag is the release trigger. The tag's commit must carry the same
+# workspace version as the tag (the `version` job refuses otherwise), and the
+# tag must be annotated: its first line becomes the release title and the rest
+# becomes the hand-written part of the release notes (docs/releasing.md).
 on:
   schedule:
     # Nightly, off the hour so it does not collide with the release traffic of
@@ -35,6 +41,15 @@ env:
   # which is the whole reason it can be published as any-distro/any-version.
   CLOUDSMITH_DISTRO: any-distro
   CLOUDSMITH_VERSION: any-version
+  # The second repository, on our own Forgejo instance. Host, owner and user are
+  # variables for the same reason as the Cloudsmith slug: users paste them into
+  # sources.list.d, so moving them is a settings change. The distribution is the
+  # same any-distro string and the components are the same channels, so the two
+  # repositories are interchangeable in an apt source line.
+  FORGEJO_URL: ${{ vars.FORGEJO_URL || 'https://forge.offworld.nexus' }}
+  FORGEJO_OWNER: ${{ vars.FORGEJO_OWNER || 'OffworldNexus' }}
+  FORGEJO_USER: ${{ vars.FORGEJO_USER || 'Xowap' }}
+  FORGEJO_DISTRIBUTION: any-distro
 
 jobs:
   version:
@@ -49,16 +64,23 @@ jobs:
         name: Pick a version and a channel
         run: |
           set -eu
-          if [ -n "${{ inputs.version }}" ]; then
-            # A manual run is a nightly unless someone says otherwise, which is
-            # what the version input is for.
-            version='${{ inputs.version }}'
-            component=nightly
-          elif [ "$GITHUB_REF_TYPE" = tag ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
-            # A tagged release is its own version and belongs on the stable
-            # channel: 0.1.0 sorts above every 0.1.0~nightly… that came before.
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
+            # A tag is the release, and its name is the version. The commit must
+            # say the same thing: a package whose `tpmd --version` disagrees
+            # with its apt version is a lie that outlives the release.
             version="${GITHUB_REF_NAME#v}"
             component=main
+            cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+            if [ "$cargo_version" != "$version" ]; then
+              echo "tag ${GITHUB_REF_NAME} is ${version}, but Cargo.toml says ${cargo_version}" >&2
+              echo "bump the workspace version before tagging (docs/releasing.md)" >&2
+              exit 1
+            fi
+          elif [ -n "${{ inputs.version }}" ]; then
+            # A manual run off a branch is a nightly unless someone says
+            # otherwise, which is what the version input is for.
+            version='${{ inputs.version }}'
+            component=nightly
           else
             base=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
             version="${base}~nightly$(date -u +%Y%m%d).r${GITHUB_RUN_NUMBER}+g$(git rev-parse --short HEAD)"
@@ -215,6 +237,98 @@ jobs:
               --republish
           done
 
+  # The same packages on our own Forgejo instance, as a second repository rather
+  # than a replacement: installable with one sources.list line, it is the copy
+  # that stays up when the hosted one does not. Its own job, running beside
+  # `publish`, because a mirror that is down must not stop the Cloudsmith push
+  # from having happened or `verify` from running — but it does fail the run,
+  # and deliberately so: a mirror that silently misses releases is worse than a
+  # red nightly. It is not in `release`'s needs, so a tag still releases.
+  publish-forgejo:
+    name: publish (forgejo)
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    outputs:
+      mirrored: ${{ steps.mirror.outputs.mirrored }}
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      - id: mirror
+        name: Push to the Forgejo APT repository
+        env:
+          FORGEJO_PACKAGES_TOKEN: ${{ secrets.FORGEJO_PACKAGES_TOKEN }}
+          COMPONENT: ${{ needs.version.outputs.component }}
+        run: |
+          set -eu
+          # A fork or a local run has no token and gets no mirror. That is the
+          # whole behaviour there: nothing above depends on this job.
+          if [ -z "${FORGEJO_PACKAGES_TOKEN:-}" ]; then
+            echo "FORGEJO_PACKAGES_TOKEN is not set, skipping the Forgejo mirror"
+            echo "mirrored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          FORGEJO_URL=${FORGEJO_URL%/}
+          pool="${FORGEJO_URL}/api/packages/${FORGEJO_OWNER}/debian/pool/${FORGEJO_DISTRIBUTION}/${COMPONENT}"
+
+          # Echoes the HTTP status of one upload; the body is left in
+          # /tmp/upload.body for the failure path to print. `--fail-with-body`
+          # still exits non-zero for an HTTP error, hence `set +e` around the
+          # call: the status is what the branch below has to read. Its stderr is
+          # kept aside too, so an expected 409 does not read like a failure.
+          upload() {
+            local status
+            set +e
+            status=$(curl -sS --fail-with-body -o /tmp/upload.body -w '%{http_code}' \
+              --user "${FORGEJO_USER}:${FORGEJO_PACKAGES_TOKEN}" \
+              --upload-file "$1" "$pool/upload" 2>/tmp/upload.err)
+            set -e
+            echo "$status"
+          }
+
+          # Only the binaries. Forgejo's Debian registry generates no source
+          # index and rejects a .dsc upload, so `apt-get source` remains what
+          # Cloudsmith serves — a difference docs/install.md states.
+          for package in dist/*.deb; do
+            # <package>_<version>_<architecture>, extension off. A Debian
+            # version and package name cannot contain an underscore, so the
+            # split is exact.
+            file=$(basename "$package" .deb)
+            rest=${file#*_}
+            name=${file%%_*}
+            version=${rest%_*}
+            architecture=${rest##*_}
+
+            echo "pushing $package"
+            status=$(upload "$package")
+            if [ "$status" = 201 ]; then
+              continue
+            fi
+
+            # 409 is this same file already published, which a re-run of a
+            # failed run produces: the version is stamped from the run number
+            # and commit, so it does not change. Debian files cannot be replaced
+            # in place, so the counterpart of Cloudsmith's --republish is to
+            # delete this one file and upload it again.
+            if [ "$status" = 409 ]; then
+              curl -sS --fail-with-body -X DELETE \
+                --user "${FORGEJO_USER}:${FORGEJO_PACKAGES_TOKEN}" \
+                "$pool/${name}/${version}/${architecture}"
+              status=$(upload "$package")
+              if [ "$status" = 201 ]; then
+                continue
+              fi
+            fi
+
+            cat /tmp/upload.body /tmp/upload.err >&2
+            echo "pushing $file to the Forgejo mirror failed with HTTP $status" >&2
+            exit 1
+          done
+          echo "mirrored=true" >> "$GITHUB_OUTPUT"
+
   verify:
     name: verify installs (${{ matrix.arch }})
     needs: [version, publish]
@@ -241,6 +355,34 @@ jobs:
           TPMD_VERIFY_COMPONENT: ${{ needs.version.outputs.component }}
         run: packaging/deb/verify-install.sh
 
+  # The mirror is checked the same way, from the mirror, in a clean container
+  # per release. It is a separate job because a fork has no FORGEJO token and
+  # therefore no mirror to check; on a run that did mirror, it is just as much
+  # a release gate as Cloudsmith is, and `release` waits for it.
+  verify-forgejo:
+    name: verify installs from forgejo (${{ matrix.arch }})
+    needs: [version, publish-forgejo]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install from the Forgejo mirror, release by release
+        # A run without the mirror token has nothing to check; the job still
+        # succeeds so `release` can depend on it unconditionally. On a run that
+        # mirrored, this is a release gate like the Cloudsmith one.
+        if: needs.publish-forgejo.outputs.mirrored == 'true'
+        env:
+          TPMD_VERIFY_REPO: forgejo
+          TPMD_VERIFY_COMPONENT: ${{ needs.version.outputs.component }}
+        run: packaging/deb/verify-install.sh
+
   # The nightly channel keeps its last seven versions; stable keeps everything.
   # After `verify`, never before: a nightly that did not install cleanly on every
   # release does not get to push a good one out, and the version just published
@@ -258,37 +400,83 @@ jobs:
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
         run: python3 packaging/deb/prune-nightlies.py --keep 7
 
-  # A tag is a release, and a release carries artifacts. Deliberately inert for
-  # now: `RELEASE_ARTIFACTS_COMPLETE` is unset, so a tag publishes to the `main`
-  # component and stops there, because a release that carried only the Debian
-  # packages would be a release that says "download me" about a machine it does
-  # not yet serve.
+  # The mirror keeps the same seven. After `verify` for the same reason, and
+  # only once the mirror publish happened: a run with no token, or one whose
+  # mirror push failed, leaves the mirror's retention alone. The whole version
+  # goes at once — the generic package API deletes it across both channels —
+  # and a stable release is never a candidate.
+  prune-forgejo:
+    name: prune old nightlies (forgejo)
+    if: needs.version.outputs.component == 'nightly' && needs.publish-forgejo.outputs.mirrored == 'true'
+    needs: [version, verify, verify-forgejo, publish-forgejo]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Keep the newest seven nightly versions
+        env:
+          FORGEJO_PACKAGES_TOKEN: ${{ secrets.FORGEJO_PACKAGES_TOKEN }}
+        run: python3 packaging/deb/prune-forgejo-nightlies.py --keep 7
+
+  # A tag is a release, and from 0.1 the Debian packages are the complete set:
+  # tpmd is distributed by apt only for now, and RPM/Arch/Windows/macOS
+  # packaging will add their own workflows and artifacts in later versions. The
+  # job therefore waits for both repositories to have been published and
+  # installed cleanly, then creates the GitHub release and attaches exactly
+  # what was published.
   #
-  # Set the repository variable to `true` once every platform is packaging. It is
-  # a variable rather than a code change so the day the RPM, Arch, macOS and
-  # Windows packages exist, turning releases on is a settings edit and not a
-  # commit that races the others. Each of those workflows appends its own assets
-  # to the same release, so nothing here has to know about them — and `needs:
-  # verify` means a release only ever follows a package set that installed
-  # cleanly on every supported release.
+  # The tag must be annotated (docs/releasing.md). Its first line is the release
+  # title; the remaining lines are prepended to GitHub's generated notes, so the
+  # hand-written summary is the first thing a reader sees and the commit/PR list
+  # is still there underneath.
   release:
     name: git release
-    if: github.ref_type == 'tag' && vars.RELEASE_ARTIFACTS_COMPLETE == 'true'
-    needs: [version, source, build, publish, verify]
+    if: github.ref_type == 'tag'
+    needs: [version, source, build, publish, verify, verify-forgejo]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
+        with:
+          # The annotated tag message lives in the tag object, not in the commit,
+          # so the whole history (and the tag) has to be fetched.
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true
 
+      - name: Checksums for every artifact
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - name: Read the annotated tag
+        id: tag
+        run: |
+          set -eu
+          if [ "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" != tag ]; then
+            echo "release tags must be annotated: see docs/releasing.md" >&2
+            exit 1
+          fi
+          git for-each-ref "refs/tags/${GITHUB_REF_NAME}" \
+            --format='%(contents)' > /tmp/tag-message.md
+          title=$(head -n 1 /tmp/tag-message.md | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+          [ -n "$title" ] || title="tpmd ${GITHUB_REF_NAME#v}"
+          {
+            echo "title<<__TAG_TITLE__"
+            echo "$title"
+            echo "__TAG_TITLE__"
+          } >> "$GITHUB_OUTPUT"
+          tail -n +2 /tmp/tag-message.md > /tmp/tag-body.md
+
       - name: Publish the release and attach what was built
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
+          name: ${{ steps.tag.outputs.title }}
+          body_path: /tmp/tag-body.md
           generate_release_notes: true
           fail_on_unmatched_files: true
-          files: dist/*
+          files: |
+            dist/*

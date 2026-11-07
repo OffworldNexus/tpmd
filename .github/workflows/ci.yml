@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  # Allow the checks to be run explicitly on a ref whose push would not trigger
+  # them (a branch pushed by an automation token, or a tag ref).
+  workflow_dispatch:
   # Every ticket gets its own `feature/<linear-id>-…` branch, so those are
   # first-class CI targets alongside the integration branch, `develop`.
   push:

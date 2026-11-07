@@ -11,6 +11,11 @@
 # failure names the release it happened on, which is the point: one artifact is
 # published for all of them, and this is what proves that claim.
 #
+# The repository checked is Cloudsmith by default. Set TPMD_VERIFY_REPO=forgejo
+# to check the mirror instead; its setup is the alternative documented in
+# docs/install.md, and it serves no source index, so the source check is skipped
+# there.
+#
 # What each release is checked for:
 #   1. the repository signs and resolves (the documented setup path, verbatim),
 #      and the split arrives with it — every backend package, and the plugins in
@@ -32,9 +37,33 @@
 
 set -eu
 
-owner=${CLOUDSMITH_OWNER:-offworld-nexus}
-repo=${CLOUDSMITH_REPO:-apt}
-base="https://dl.cloudsmith.io/public/${owner}/${repo}"
+# Which repository to install from. Both are documented in docs/install.md and
+# carry the same packages under the same `any-distro` suite and channel
+# components, so this only chooses the setup path, never the artefact.
+repo_kind=${TPMD_VERIFY_REPO:-cloudsmith}
+component=${TPMD_VERIFY_COMPONENT:-main}
+setup_url=
+forgejo_key_url=
+forgejo_source=
+case "$repo_kind" in
+cloudsmith)
+	owner=${CLOUDSMITH_OWNER:-offworld-nexus}
+	repo=${CLOUDSMITH_REPO:-apt}
+	base="https://dl.cloudsmith.io/public/${owner}/${repo}"
+	setup_url="${base}/cfg/setup/bash.deb.sh"
+	;;
+forgejo)
+	forgejo_url=${FORGEJO_URL:-https://forge.offworld.nexus}
+	forgejo_url=${forgejo_url%/}
+	forgejo_owner=${FORGEJO_OWNER:-OffworldNexus}
+	forgejo_key_url="${forgejo_url}/api/packages/${forgejo_owner}/debian/repository.key"
+	forgejo_source="deb [signed-by=/etc/apt/keyrings/tpmd-forgejo.asc] ${forgejo_url}/api/packages/${forgejo_owner}/debian any-distro ${component}"
+	;;
+*)
+	printf 'verify-install.sh: unknown TPMD_VERIFY_REPO: %s\n' "$repo_kind" >&2
+	exit 1
+	;;
+esac
 
 # A locally built .deb can be checked without a published repository, which is
 # what makes this runnable before the first publish and on a pull request. The
@@ -85,7 +114,11 @@ for image in $images; do
 	printf '\n== %s (%s/%s)\n' "$image" "$distro" "$codename"
 
 	if docker run --rm $mount --env TPMD_DEB_NAME="${deb##*/}" \
-		--env TPMD_VERIFY_COMPONENT="${TPMD_VERIFY_COMPONENT:-main}" \
+		--env TPMD_VERIFY_REPO="$repo_kind" \
+		--env TPMD_VERIFY_COMPONENT="$component" \
+		--env TPMD_VERIFY_SETUP_URL="$setup_url" \
+		--env TPMD_VERIFY_FORGEJO_KEY_URL="$forgejo_key_url" \
+		--env TPMD_VERIFY_FORGEJO_SOURCE="$forgejo_source" \
 		"$image" sh -eu -c '
 		export DEBIAN_FRONTEND=noninteractive
 		apt-get update -qq
@@ -98,9 +131,17 @@ for image in $images; do
 		# it.
 		if [ -n "${TPMD_DEB_NAME:-}" ]; then
 			apt-get install -y -qq /debs/*.deb >&2
+		elif [ "${TPMD_VERIFY_REPO:-cloudsmith}" = forgejo ]; then
+			install -d -m 0755 /etc/apt/keyrings
+			curl -1sLf "$TPMD_VERIFY_FORGEJO_KEY_URL" \
+				-o /etc/apt/keyrings/tpmd-forgejo.asc
+			printf "%s\n" "$TPMD_VERIFY_FORGEJO_SOURCE" \
+				> /etc/apt/sources.list.d/tpmd-forgejo.list
+			apt-get update -qq
+			apt-get install -y -qq tpmd >&2
 		else
-			curl -1sLf "'"$base"'/cfg/setup/bash.deb.sh" \
-				| distro='"$distro"' codename='"$codename"' component='"${TPMD_VERIFY_COMPONENT:-main}"' bash
+			curl -1sLf "$TPMD_VERIFY_SETUP_URL" \
+				| distro='"$distro"' codename='"$codename"' component='"$component"' bash
 			apt-get update -qq
 			apt-get install -y -qq tpmd >&2
 		fi
@@ -205,11 +246,13 @@ for image in $images; do
 		wait "$afterpid" 2>/dev/null || true
 		unset TPMD_STATE_DIR
 
-		# Step 6: the source package. Only from the published repository: a local
-		# check installs .debs and has no index to fetch a source from. apt checks
-		# what it downloads against the signed Sources index, so a fetch that
-		# succeeds is a fetch of what was signed.
-		if [ -z "${TPMD_DEB_NAME:-}" ]; then
+		# Step 6: the source package. Only from Cloudsmith: a local check installs
+		# .debs and has no index to fetch a source from, and the Forgejo Debian
+		# registry serves binaries only (no Sources index). apt checks what it
+		# downloads against the signed Sources index, so a fetch that succeeds is
+		# a fetch of what was signed.
+		if [ -z "${TPMD_DEB_NAME:-}" ] \
+			&& [ "${TPMD_VERIFY_REPO:-cloudsmith}" = cloudsmith ]; then
 			installed=$(dpkg-query -W -f="\${Version}" tpmd)
 			apt-get install -y -qq --no-install-recommends dpkg-dev >/dev/null
 			mkdir -p /tmp/verify-source
