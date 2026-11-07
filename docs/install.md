@@ -1,10 +1,11 @@
 # Installing tpmd
 
-`tpmd` is published as Debian packages from a signed APT repository, two
-channels deep, built nightly for every currently supported Debian-like
+`tpmd` is published as Debian packages from two signed APT repositories — the
+primary one on Cloudsmith and a mirror on our Forgejo instance — each two
+channels deep and built nightly for every currently supported Debian-like
 release. One artifact per architecture serves them all: the daemon's only
-runtime dependency is glibc, so a single build installs and runs from Debian
-12 through sid and from Ubuntu 22.04 through 26.04.
+runtime dependency is glibc, so a single build installs and runs from Debian 12
+through sid and from Ubuntu 22.04 through 26.04.
 
 The published set is the agent plus one package per backend above the built-in
 floor. Installing `tpmd` brings the whole ladder with it — the backend
@@ -187,14 +188,18 @@ installed cleanly on every supported release. A nightly is therefore something
 to upgrade from, not something to pin: `apt-get install tpmd=<version>` of a
 nightly works for about a week. Pin a stable release instead.
 
-A `v*` tag is a release, and the same pipeline builds it: the bare version, to
-the `main` component, and — once every platform is packaging — the built
-packages attached to a GitHub release for that tag. That release step is gated on
-a repository variable (`RELEASE_ARTIFACTS_COMPLETE`), so a tag cannot mint a
-release carrying a partial set; today it is unset, and a tag publishes to `main`
-and stops there. Each platform's packaging workflow appends its own artifacts to
-the same release, so the release becomes complete without any one workflow
-having to know about the others.
+A `v*` tag is a release, and the same pipeline builds it: the bare version goes
+to the `main` component of both repositories, is installed from each of them in
+a clean container per supported release, and is then attached to the GitHub
+release for that tag together with its source package and a `SHA256SUMS` file.
+As of 0.1 the Debian packages are the complete set — tpmd is distributed by APT
+only — so a tag is a complete release. RPM, Arch, Windows and macOS packaging
+will add their own workflows and artifacts in later versions, and the release
+step will wait for those too when they exist.
+
+Releasing is tag-driven and documented in [`releasing.md`](releasing.md): the
+tag is annotated, its first line is the release title, and the rest of the
+message is prepended to GitHub's generated notes.
 
 To follow releases instead of nightlies, install and then hold:
 
