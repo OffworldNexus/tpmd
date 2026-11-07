@@ -200,9 +200,10 @@ nothing in it.
   `dist/` is written there.
 
 - **Retention:** every stable release is kept; nightlies are pruned to the
-  newest seven versions by `packaging/deb/prune-nightlies.py` (the workflow's
-  `prune` job, after `verify`). Try it with `--dry-run`; it deletes whole
-  versions and never one without `~nightly`.
+  newest seven versions by `packaging/deb/prune-nightlies.py` on Cloudsmith and
+  `packaging/deb/prune-forgejo-nightlies.py` on the mirror (the workflow's
+  `prune` and `prune-forgejo` jobs, after `verify`). Try them with `--dry-run`;
+  they delete whole versions and never one without `~nightly`.
 - Verify an install for real (needs docker and network; installs from the
   *published* repository in a clean container per release): `packaging/deb/verify-install.sh`.
 - **No distribution can build this package.** The workspace declares
