@@ -228,6 +228,11 @@ Swap `nightly` for `main` to follow releases instead. Both repositories can be
 configured at the same time: the versions are identical, so which one apt
 resolves to does not change what is installed.
 
+The packages themselves are listed on the organization's package page,
+<https://forge.offworld.nexus/OffworldNexus/-/packages>. Forgejo's Debian
+registry is owner-scoped, so the repository's own *Packages* tab stays empty
+even though apt sees the packages; use the organization page to look at them.
+
 One difference is worth knowing: the mirror serves binaries only. Forgejo's
 Debian registry has no source index, so `apt-get source tpmd` and the `deb-src`
 line above stay a Cloudsmith capability.
