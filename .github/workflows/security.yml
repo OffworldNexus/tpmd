@@ -213,6 +213,19 @@ jobs:
             echo "a temporary advisory ignore survived the fix" >&2
             exit 1
           fi
+          # Rebuild the strict config from what is about to be committed, so a
+          # missing permanent ignore (the zbus unmaintained notices) is caught
+          # here rather than by CI after the PR is open.
+          python3 - <<'PY'
+          import pathlib
+          source = pathlib.Path("deny.toml")
+          lines = [
+              line
+              for line in source.read_text().splitlines(keepends=True)
+              if "TEMPORARY" not in line
+          ]
+          pathlib.Path("/tmp/deny-strict.toml").write_text("".join(lines))
+          PY
           cargo deny --config /tmp/deny-strict.toml check advisories
           cargo fmt --all --check
           cargo test --workspace --all-targets -q
