@@ -455,6 +455,11 @@ jobs:
         id: tag
         run: |
           set -eu
+          # actions/checkout resolves a tag ref to its commit and force-updates
+          # the local tag to that commit, which discards the annotation. Fetch
+          # the tag object back before reading its message.
+          git fetch --force --no-tags origin \
+            "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
           if [ "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" != tag ]; then
             echo "release tags must be annotated: see docs/releasing.md" >&2
             exit 1
