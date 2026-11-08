@@ -846,9 +846,9 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto-bigint"
-version = "0.7.5"
+version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a52aa3fcda4e6302a9f48734f234d35d4721b96f8fe07d073f07ce9df4f0271"
+checksum = "9c035cb64cba03dad2fb921f3e218785e8cf9a41790da5eb3a1400f62fa2be11"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -881,9 +881,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.3"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03bb0e1cc970d482d121d9a1744999169b69a07470b3d644a7894e53fcaf4574"
+checksum = "261af4dc7a06ea8a527a8717d8cbba3417530d6ea14e1edb3de6b67806be474f"
 dependencies = [
  "cmov",
  "subtle",
@@ -3261,7 +3261,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "clap",
@@ -3289,7 +3289,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-backend"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "thiserror",
@@ -3299,7 +3299,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-backend-dummy"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -3317,7 +3317,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-backend-keyring"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "apple-native-keyring-store",
  "async-trait",
@@ -3341,7 +3341,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-backend-keyring-plugin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tpmd-backend-keyring",
  "tpmd-plugin",
@@ -3349,7 +3349,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-backend-linux-tpm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -3370,7 +3370,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-backend-linux-tpm-plugin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tpmd-backend-linux-tpm",
  "tpmd-plugin",
@@ -3378,7 +3378,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-backend-macos-se"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "core-foundation",
@@ -3399,7 +3399,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-backend-windows-cng"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -3419,7 +3419,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror",
  "tokio",
@@ -3429,7 +3429,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-demo"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "hex",
@@ -3443,7 +3443,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-ipc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "listenfd",
@@ -3456,7 +3456,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-plugin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "libloading",
@@ -3468,7 +3468,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-plugin-fixture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "sea-orm",
@@ -3481,7 +3481,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hex",
  "postcard",
@@ -3492,7 +3492,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "sea-orm",
  "sea-orm-migration",
