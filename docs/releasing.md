@@ -203,7 +203,10 @@ way a patch release happens:
    acceptance (the permanent unmaintained-crate ignores stay).
 2. If an advisory is found, it runs headless OpenCode with the OpenRouter model
    to update the affected dependencies and to remove any temporary ignores from
-   `deny.toml`.
+   `deny.toml`. It prefers the highest release that keeps the test suite green,
+   including a semver-incompatible bump when that is what the fix requires; it
+   does not stop at the advisory's minimum and does not choose a yanked
+   version.
 3. It runs the test suite, opens and merges a branch through a PR, bumps the
    workspace version to the next patch, tags `vX.Y.Z`, and lets the tag push
    start the normal packaging workflow.

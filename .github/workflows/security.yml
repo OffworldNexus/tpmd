@@ -168,14 +168,15 @@ jobs:
 
           Rules:
           1. Read /tmp/deny.json and identify every vulnerability diagnostic.
-          2. Update only the affected crates. Prefer a plain
-             `cargo update -p <crate>`, which takes the newest release compatible
-             with the current semver line; use `--precise` only when that is not
-             enough. Do not stop at the minimum patched version, and do not
-             choose a version cargo reports as yanked. For these two advisories
-             the expected results are crypto-bigint 0.7.10 and ctutils 0.4.8.
-             Do not run a blanket `cargo update` and do not touch unrelated
-             crates.
+          2. Update only the affected crates. Prefer the highest published release
+             that keeps `cargo test` green, even if it steps outside the
+             currently declared semver range; update the manifest constraint when
+             it does. A plain `cargo update -p <crate>` takes the newest
+             compatible release; use `--precise` or a manifest change when the
+             fix requires more. Do not run a blanket `cargo update` of unrelated
+             crates, and do not choose a version cargo reports as yanked. For
+             these two advisories the expected results are crypto-bigint 0.7.10
+             and ctutils 0.4.8.
           3. Remove only the ignore lines in deny.toml whose comment contains
              TEMPORARY, together with the comment block that explains them.
              Leave the zbus unmaintained ignores and every other line alone.

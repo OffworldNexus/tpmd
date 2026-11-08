@@ -28,6 +28,11 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+# `warn`, not `deny`, on purpose: the graph legitimately carries more than one
+# semver line of a few crates — `sha2` 0.10 (SeaORM/sqlx) beside 0.11
+# (`p256`/`secret-service`), `hashbrown` 0.16 beside 0.17, and the `zbus` 5
+# tree — because the consumers are on incompatible majors. Unifying them is an
+# upstream change, not a tpmd defect, so these are reported as information.
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"
