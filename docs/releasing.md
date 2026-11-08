@@ -86,9 +86,12 @@ not bump `PROTOCOL_VERSION` for a release that changes no wire bytes.
 Release tags are **annotated** and named `vMAJOR.MINOR.PATCH`:
 
 ```sh
-git tag -a v0.1.0 -F /tmp/tag-message.md
+git tag -a --cleanup=verbatim v0.1.0 -F /tmp/tag-message.md
 git push origin v0.1.0
 ```
+
+`--cleanup=verbatim` is not optional: git's default tag-message cleanup treats
+lines starting with `#` as comments and silently strips every Markdown heading.
 
 Never use a lightweight tag, never reuse a tag name, never move a tag after it
 has been pushed, and never delete a published release. A mistake is fixed by
