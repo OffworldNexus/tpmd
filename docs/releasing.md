@@ -207,14 +207,44 @@ way a patch release happens:
 2. If an advisory is found, it runs headless OpenCode with the OpenRouter model
    to update the affected dependencies and to remove any temporary ignores from
    `deny.toml`. It prefers the highest release that keeps the test suite green,
-   including a semver-incompatible bump when that is what the fix requires; it
-   does not stop at the advisory's minimum and does not choose a yanked
-   version.
+   including a semver-incompatible bump; when the upgrade breaks source, tests
+   or configuration, it fixes them in the same branch. It does not stop at the
+   advisory's minimum and does not choose a yanked version.
 3. It runs the test suite, opens and merges a branch through a PR, bumps the
    workspace version to the next patch, tags `vX.Y.Z`, and lets the tag push
    start the normal packaging workflow.
 4. The release notes come from the tag message, which lists the RUSTSEC IDs and
    the dependency changes.
+
+### Reliable hourly trigger
+
+GitHub's `schedule` event is best-effort. This repository has seen the hourly
+slot delayed or dropped for hours — the daily packaging cron arrives five to
+seven hours late — so the workflow's own cron is a backup, not a guarantee. For
+a real hourly check, dispatch it from an external scheduler:
+
+```sh
+GH_TOKEN=... packaging/security-cron.sh
+```
+
+The token needs `Actions: write`; `RELEASE_TOKEN` already has it. A systemd
+timer on any always-on host is enough:
+
+```ini
+# /etc/systemd/system/tpmd-security.service
+[Service]
+Type=oneshot
+Environment=GH_TOKEN=...
+ExecStart=/usr/local/bin/security-cron.sh
+
+# /etc/systemd/system/tpmd-security.timer
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
 
 A human may also cut a security patch by hand using the procedure above. Do not
 edit a released tag to "add" a fix.

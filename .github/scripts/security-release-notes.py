@@ -99,9 +99,9 @@ def main() -> int:
     lines = [
         f"tpmd {args.version} (security)",
         "",
-        "This patch updates the dependencies tpmd carries. It contains no",
-        "functional or wire-protocol change: the same daemon, with the same",
-        "keys, on the same binary interface.",
+        "This patch updates the dependencies tpmd carries and fixes whatever the",
+        "upgrade broke. The workspace test suite and the packaging install matrix",
+        "gate it.",
         "",
         "## Security",
         "",

@@ -7,8 +7,12 @@ name: security advisories
 # fixable advisory from this workflow. When a vulnerability is found, headless
 # OpenCode (OpenRouter) updates the affected crates and removes the temporary
 # ignores; the workflow then runs the tests, lands the change through a PR,
-# bumps the patch version, tags it, and dispatches the normal packaging
-# workflow on the tag.
+# bumps the patch version, tags it, and lets the tag push start the normal
+# packaging workflow.
+#
+# GitHub's own `schedule` is best-effort and has been delayed by hours in this
+# repository; the cron below is a backup. `packaging/security-cron.sh` is the
+# external hourly trigger to run from cron or a systemd timer.
 #
 # A user token is used instead of GITHUB_TOKEN because the organization forbids
 # GitHub Actions from creating pull requests, and because a GITHUB_TOKEN push or
@@ -168,15 +172,18 @@ jobs:
 
           Rules:
           1. Read /tmp/deny.json and identify every vulnerability diagnostic.
-          2. Update only the affected crates. Prefer the highest published release
-             that keeps `cargo test` green, even if it steps outside the
-             currently declared semver range; update the manifest constraint when
-             it does. A plain `cargo update -p <crate>` takes the newest
-             compatible release; use `--precise` or a manifest change when the
-             fix requires more. Do not run a blanket `cargo update` of unrelated
-             crates, and do not choose a version cargo reports as yanked. For
-             these two advisories the expected results are crypto-bigint 0.7.10
-             and ctutils 0.4.8.
+          2. Fix the advisory at the highest version the project can take, not
+             the smallest version that silences it. Update the affected crates to
+             the newest published release, even when that is a
+             semver-incompatible bump: change the manifest constraints, then run
+             `cargo test --workspace --all-targets -q` and fix whatever the
+             upgrade breaks in Rust source, tests, configuration or feature
+             flags. You may use `cargo update`, `cargo upgrade` (install
+             cargo-edit if needed) or `--precise`. Do not stop at the advisory
+             minimum and do not choose a yanked version. Keep the change
+             focused: do not upgrade unrelated crates the advisory does not
+             require. For these two advisories the expected results are
+             crypto-bigint 0.7.10 and ctutils 0.4.8.
           3. Remove only the ignore lines in deny.toml whose comment contains
              TEMPORARY, together with the comment block that explains them.
              Leave the zbus unmaintained ignores and every other line alone.
@@ -186,13 +193,14 @@ jobs:
              do not fail the check; leave them alone unless they are the crate
              you are fixing and the chosen version is yanked.
           5. Do not change the workspace version, do not write release notes, and
-             do not commit, push, tag or open a pull request. Do not edit Rust
-             source. The workflow owns the release.
+             do not commit, push, tag or open a pull request. You may edit Rust
+             source, tests, manifests and configuration when that is what the
+             upgrade needs; the workflow owns the release.
 
-          If an advisory has no fixed version, or a fix needs a semver-incompatible
-          upgrade, stop and write /tmp/security-blocked with the RUSTSEC id and
-          what blocked it. Otherwise print a short list of the crates you moved,
-          with their old and new versions.
+          If an advisory has no fixed version, or you cannot make the upgrade pass
+          the tests after a genuine attempt, stop and write /tmp/security-blocked
+          with the RUSTSEC id and what blocked it. Otherwise print a short list
+          of the crates you moved, with their old and new versions.
           PROMPT
           timeout 45m opencode --standalone run --auto \
             --model "$OPENCODE_MODEL" --format json \
@@ -211,11 +219,14 @@ jobs:
             echo "OpenCode changed nothing" >&2
             exit 1
           fi
-          unexpected=$(git status --porcelain | awk '{print $2}' \
-            | grep -v -E '^(Cargo\.toml|Cargo\.lock|deny\.toml)$' || true)
-          if [ -n "$unexpected" ]; then
-            echo "OpenCode changed files this workflow does not release:" >&2
-            printf '%s\n' "$unexpected" >&2
+          if git status --porcelain | awk '{print $2}' \
+            | grep -q '^\.github/workflows/'; then
+            echo "OpenCode edited the workflows; refusing to release that" >&2
+            exit 1
+          fi
+          if grep -E '^[[:space:]]*"RUSTSEC-' deny.toml \
+            | grep -v -E 'RUSTSEC-2026-037[012]' | grep -q .; then
+            echo "a new advisory ignore was added instead of fixing it" >&2
             exit 1
           fi
           if grep -q 'TEMPORARY' deny.toml; then
@@ -282,6 +293,19 @@ jobs:
             --lock Cargo.lock \
             --version "${{ steps.version.outputs.version }}" \
             --output /tmp/release-notes.md
+          # A source change is part of the story: the upgrade was not a pure
+          # lockfile move, so say so rather than claiming it was.
+          if git diff --name-only HEAD \
+            | grep -v -E '^(Cargo\.toml|Cargo\.lock|deny\.toml)$' | grep -q .; then
+            {
+              echo
+              echo "## Fixes"
+              echo
+              echo "The dependency upgrade required source or test changes; the"
+              echo "release commit has the full diff."
+            } >> /tmp/release-notes.md
+          fi
+          cat /tmp/release-notes.md
 
       - name: Commit, push and open the PR
         if: steps.gate.outputs.run == 'true' && steps.deny.outputs.pending != '0'
@@ -292,7 +316,7 @@ jobs:
           git config user.name "tpmd security bot"
           git config user.email "security-bot@offworld.nexus"
           git switch -c "$branch"
-          git add Cargo.toml Cargo.lock deny.toml
+          git add -A
           git commit \
             -m "[security] Fix RustSec advisories for ${{ steps.version.outputs.version }}" \
             -m "$(cat /tmp/release-notes.md)"
