@@ -351,7 +351,10 @@ jobs:
 
           # The tag is annotated: the release workflow reads its first line as
           # the release title and prepends the rest to the generated notes.
-          git tag -a "v$version" -F /tmp/release-notes.md
+          # `--cleanup=verbatim` is load-bearing: git's default cleanup treats
+          # lines starting with `#` as comments and would strip every Markdown
+          # heading from the release notes.
+          git tag -a --cleanup=verbatim "v$version" -F /tmp/release-notes.md
           # A real user token makes this a real tag push, so `push` triggers the
           # packaging workflow (a GITHUB_TOKEN push would not).
           git push origin "v$version"
