@@ -20,7 +20,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Offworld Nexus Authors"]
@@ -30,17 +30,17 @@ repository = "https://github.com/OffworldNexus/tpmd"
 [workspace.dependencies]
 # Internal crates. `version` accompanies each `path` so the crates could be
 # published later without editing every manifest.
-tpmd-proto = { path = "crates/tpmd-proto", version = "0.1.0" }
-tpmd-backend = { path = "crates/tpmd-backend", version = "0.1.0" }
-tpmd-store = { path = "crates/tpmd-store", version = "0.1.0" }
-tpmd-backend-dummy = { path = "crates/tpmd-backend-dummy", version = "0.1.0" }
-tpmd-backend-keyring = { path = "crates/tpmd-backend-keyring", version = "0.1.0" }
-tpmd-backend-linux-tpm = { path = "crates/tpmd-backend-linux-tpm", version = "0.1.0" }
-tpmd-backend-windows-cng = { path = "crates/tpmd-backend-windows-cng", version = "0.1.0" }
-tpmd-backend-macos-se = { path = "crates/tpmd-backend-macos-se", version = "0.1.0" }
-tpmd-plugin = { path = "crates/tpmd-plugin", version = "0.1.0" }
-tpmd-ipc = { path = "crates/tpmd-ipc", version = "0.1.0" }
-tpmd-client = { path = "crates/tpmd-client", version = "0.1.0" }
+tpmd-proto = { path = "crates/tpmd-proto", version = "0.1.1" }
+tpmd-backend = { path = "crates/tpmd-backend", version = "0.1.1" }
+tpmd-store = { path = "crates/tpmd-store", version = "0.1.1" }
+tpmd-backend-dummy = { path = "crates/tpmd-backend-dummy", version = "0.1.1" }
+tpmd-backend-keyring = { path = "crates/tpmd-backend-keyring", version = "0.1.1" }
+tpmd-backend-linux-tpm = { path = "crates/tpmd-backend-linux-tpm", version = "0.1.1" }
+tpmd-backend-windows-cng = { path = "crates/tpmd-backend-windows-cng", version = "0.1.1" }
+tpmd-backend-macos-se = { path = "crates/tpmd-backend-macos-se", version = "0.1.1" }
+tpmd-plugin = { path = "crates/tpmd-plugin", version = "0.1.1" }
+tpmd-ipc = { path = "crates/tpmd-ipc", version = "0.1.1" }
+tpmd-client = { path = "crates/tpmd-client", version = "0.1.1" }
 
 # macOS Secure Enclave access, through safe wrappers — so this backend needs no
 # `unsafe` either, which is why it is not a third exception to the rule in
