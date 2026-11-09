@@ -1737,9 +1737,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.37.0"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f111c8c41e7c61a49cd34e44c7619462967221a6443b0ec299e0ac30cfb9b1"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -2995,8 +2995,6 @@ dependencies = [
 [[package]]
 name = "sqlx-sqlite"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "488e99c397a62007e4229aec669a179816339afc6d2620ca6fa420dbee2e982c"
 dependencies = [
  "atoi 2.0.0",
  "chrono",
@@ -3261,7 +3259,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "clap",
@@ -3289,7 +3287,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-backend"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "thiserror",
@@ -3299,7 +3297,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-backend-dummy"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -3317,7 +3315,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-backend-keyring"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "apple-native-keyring-store",
  "async-trait",
@@ -3341,7 +3339,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-backend-keyring-plugin"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "tpmd-backend-keyring",
  "tpmd-plugin",
@@ -3349,7 +3347,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-backend-linux-tpm"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -3370,7 +3368,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-backend-linux-tpm-plugin"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "tpmd-backend-linux-tpm",
  "tpmd-plugin",
@@ -3378,7 +3376,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-backend-macos-se"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "core-foundation",
@@ -3399,7 +3397,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-backend-windows-cng"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -3419,7 +3417,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-client"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "thiserror",
  "tokio",
@@ -3429,7 +3427,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-demo"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "hex",
@@ -3443,7 +3441,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-ipc"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "libc",
  "listenfd",
@@ -3456,7 +3454,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-plugin"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "libloading",
@@ -3468,7 +3466,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-plugin-fixture"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "sea-orm",
@@ -3481,7 +3479,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-proto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "hex",
  "postcard",
@@ -3492,7 +3490,7 @@ dependencies = [
 
 [[package]]
 name = "tpmd-store"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "sea-orm",
  "sea-orm-migration",

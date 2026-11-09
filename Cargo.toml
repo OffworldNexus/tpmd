@@ -1,5 +1,9 @@
 [workspace]
 resolver = "2"
+# A local copy of one published crate, used through `[patch.crates-io]` below to
+# move the SQLite it links past RUSTSEC-2026-0459. Kept out of the workspace so
+# its (unmodified) tests and lints are not ours to run.
+exclude = ["third-party/sqlx-sqlite"]
 members = [
     "crates/tpmd-proto",
     "crates/tpmd-backend",
@@ -20,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Offworld Nexus Authors"]
@@ -30,17 +34,17 @@ repository = "https://github.com/OffworldNexus/tpmd"
 [workspace.dependencies]
 # Internal crates. `version` accompanies each `path` so the crates could be
 # published later without editing every manifest.
-tpmd-proto = { path = "crates/tpmd-proto", version = "0.1.1" }
-tpmd-backend = { path = "crates/tpmd-backend", version = "0.1.1" }
-tpmd-store = { path = "crates/tpmd-store", version = "0.1.1" }
-tpmd-backend-dummy = { path = "crates/tpmd-backend-dummy", version = "0.1.1" }
-tpmd-backend-keyring = { path = "crates/tpmd-backend-keyring", version = "0.1.1" }
-tpmd-backend-linux-tpm = { path = "crates/tpmd-backend-linux-tpm", version = "0.1.1" }
-tpmd-backend-windows-cng = { path = "crates/tpmd-backend-windows-cng", version = "0.1.1" }
-tpmd-backend-macos-se = { path = "crates/tpmd-backend-macos-se", version = "0.1.1" }
-tpmd-plugin = { path = "crates/tpmd-plugin", version = "0.1.1" }
-tpmd-ipc = { path = "crates/tpmd-ipc", version = "0.1.1" }
-tpmd-client = { path = "crates/tpmd-client", version = "0.1.1" }
+tpmd-proto = { path = "crates/tpmd-proto", version = "0.1.2" }
+tpmd-backend = { path = "crates/tpmd-backend", version = "0.1.2" }
+tpmd-store = { path = "crates/tpmd-store", version = "0.1.2" }
+tpmd-backend-dummy = { path = "crates/tpmd-backend-dummy", version = "0.1.2" }
+tpmd-backend-keyring = { path = "crates/tpmd-backend-keyring", version = "0.1.2" }
+tpmd-backend-linux-tpm = { path = "crates/tpmd-backend-linux-tpm", version = "0.1.2" }
+tpmd-backend-windows-cng = { path = "crates/tpmd-backend-windows-cng", version = "0.1.2" }
+tpmd-backend-macos-se = { path = "crates/tpmd-backend-macos-se", version = "0.1.2" }
+tpmd-plugin = { path = "crates/tpmd-plugin", version = "0.1.2" }
+tpmd-ipc = { path = "crates/tpmd-ipc", version = "0.1.2" }
+tpmd-client = { path = "crates/tpmd-client", version = "0.1.2" }
 
 # macOS Secure Enclave access, through safe wrappers — so this backend needs no
 # `unsafe` either, which is why it is not a third exception to the rule in
@@ -139,3 +143,11 @@ windows-sys = { version = "0.61", features = [
 codegen-units = 1
 lto = "thin"
 strip = true
+
+# `sqlx-sqlite` 0.9.0 is the newest published release, but it pins the SQLite
+# bindings below 0.38, whose bundled SQLite is the one RUSTSEC-2026-0459 covers.
+# The local copy is that release with one line changed: the `libsqlite3-sys`
+# requirement now admits 0.39, which bundles the patched SQLite 3.54.1. Drop
+# this patch once sqlx releases a `sqlx-sqlite` that makes the same move.
+[patch.crates-io]
+sqlx-sqlite = { path = "third-party/sqlx-sqlite" }
