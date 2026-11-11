@@ -199,22 +199,31 @@ Backlog with a comment naming this release as the reason they were deferred.
 
 ## Security patch releases
 
-The hourly `security` workflow (`.github/workflows/security.yml`) is the normal
-way a patch release happens:
+The hourly `security` workflow (`.github/workflows/security.yml`, guided by
+`.github/scripts/security-agent-prompt.md`) owns security triage and patch
+releases end-to-end:
 
 1. It runs `cargo deny` against a strict config that drops every `TEMPORARY`
-   acceptance (the permanent unmaintained-crate ignores stay).
-2. If an advisory is found, it runs headless OpenCode with the OpenRouter model
-   to update the affected dependencies and to remove any temporary ignores from
-   `deny.toml`. It prefers the highest release that keeps the test suite green,
-   including a semver-incompatible bump; when the upgrade breaks source, tests
-   or configuration, it fixes them in the same branch. It does not stop at the
-   advisory's minimum and does not choose a yanked version.
-3. It runs the test suite, opens and merges a branch through a PR, bumps the
-   workspace version to the next patch, tags `vX.Y.Z`, and lets the tag push
-   start the normal packaging workflow.
-4. The release notes come from the tag message, which lists the RUSTSEC IDs and
-   the dependency changes.
+   acceptance, and checks that the highest `v*` tag actually has a published
+   GitHub release (recovering any stranded release if a prior run failed or
+   timed out).
+2. When work is found, headless OpenCode first assesses with concrete code
+   evidence whether `tpmd` as built and deployed is genuinely exposed to the
+   vulnerability. It never vendors, forks, or `[patch.crates-io]`es third-party
+   crates; dependencies come only from published, non-yanked `crates.io`
+   releases compatible with `rust-version = "1.94"`.
+3. Only a genuine exposure triggers a patch release: the agent updates the
+   affected crates (and adapts `tpmd` source/tests if needed), bumps the
+   workspace patch version, opens a PR, watches and fixes any failing PR checks,
+   merges to `develop`, pushes the annotated `vX.Y.Z` tag, watches
+   `packaging-deb.yml` to completion (fixing any packaging failure before
+   artifacts are published), and verifies the published GitHub release.
+4. When `tpmd` is **not** exposed, no release is cut: if a clean `crates.io`
+   update exists it lands on `develop` via PR for the next regular release; if
+   upstream has not yet published a compatible release, the concrete
+   non-exposure analysis and upstream removal condition are documented in
+   `deny.toml` via PR. A genuine exposure with no published `crates.io` fix
+   fails the workflow loudly for human intervention.
 
 ### Reliable hourly trigger
 
