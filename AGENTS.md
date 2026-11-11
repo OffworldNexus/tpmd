@@ -169,11 +169,19 @@ nothing in it.
   publishes to both repositories, installs from each in a clean container per
   supported release, then creates the GitHub release with the artifacts and a
   `SHA256SUMS`. Never move or reuse a tag.
-- **Security patches** are produced by `.github/workflows/security.yml`, which
-  runs hourly: it checks `cargo deny` against a config that ignores nothing and,
-  when an advisory is fixable, runs headless OpenCode to update the dependencies
-  and remove temporary ignores, then cuts the next patch release through the
-  normal tag pipeline. Do not paper over an advisory with a permanent ignore.
+- **Security patches** are driven end-to-end by `.github/workflows/security.yml`
+  (`.github/scripts/security-agent-prompt.md`), which runs hourly: it checks
+  `cargo deny` with `TEMPORARY` ignores stripped (and checks that the latest
+  `v*` tag has a published GitHub release). When an advisory appears, headless
+  OpenCode first assesses whether `tpmd` is actually exposed under its threat
+  model: only genuine exposures cut a patch release (from published `crates.io`
+  releases — never vendored forks or `[patch.crates-io]`), driving the PR, CI,
+  annotated tag, and `packaging-deb.yml` workflow all the way to a published
+  release and fixing any CI/packaging failure along the way. Unexposed
+  advisories update `develop` without cutting a release when a clean upstream
+  upgrade exists, or document the non-exposure and upstream removal condition in
+  `deny.toml` when blocked upstream. Never hide an actual exposure behind an
+  ignore.
 - The published set is three packages, not one: `tpmd` — the daemon, with only
   the guaranteed `file` floor built in — plus one package per backend, each
   shipping a `cdylib` into `/usr/lib/tpmd/backends` that the daemon finds at run

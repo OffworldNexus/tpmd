@@ -1,31 +1,35 @@
 name: security advisories
 
-# Hourly RustSec check with an automated fix and patch release.
+# Hourly RustSec check and end-to-end autonomous security triage / release.
 #
-# The check is `cargo deny` against a *strict* copy of deny.toml: every line
-# marked TEMPORARY is removed first, so a time-boxed acceptance cannot hide a
-# fixable advisory from this workflow. When a vulnerability is found, headless
-# OpenCode (OpenRouter) updates the affected crates and removes the temporary
-# ignores; the workflow then runs the tests, lands the change through a PR,
-# bumps the patch version, tags it, and lets the tag push start the normal
-# packaging workflow.
+# The check runs `cargo deny` against a *strict* copy of deny.toml (every line
+# marked TEMPORARY removed, so time-boxed deferrals stay visible) AND verifies
+# that the latest `v*` release tag actually has a published GitHub release.
 #
-# GitHub's own `schedule` is best-effort and has been delayed by hours in this
-# repository; the cron below is a backup. `packaging/security-cron.sh` is the
+# When work is found, headless OpenCode (OpenRouter) owns the process all the
+# way through (.github/scripts/security-agent-prompt.md):
+#   1. Assesses with concrete code evidence whether tpmd is actually exposed.
+#   2. Never vendors, forks, or `[patch]`es third-party crates.
+#   3. Only cuts a patch release when tpmd is genuinely exposed (updating
+#      develop without releasing when unexposed, or documenting non-exposure in
+#      deny.toml when upstream has no compatible published fix yet).
+#   4. Drives the PR, CI checks, merge, annotated tag, and `packaging-deb.yml`
+#      release workflow to completion — diagnosing and fixing CI or packaging
+#      failures along the way rather than stopping halfway.
+#
+# After the agent exits, a deterministic audit step verifies that `origin/develop`
+# passes strict `cargo deny`, no workflows or vendored forks were introduced, no
+# bot PRs were left dangling, and the latest `v*` tag has a published release.
+#
+# GitHub's `schedule` is best-effort; `packaging/security-cron.sh` is the
 # external hourly trigger to run from cron or a systemd timer.
 #
-# A user token is used instead of GITHUB_TOKEN because the organization forbids
-# GitHub Actions from creating pull requests, and because a GITHUB_TOKEN push or
-# tag does not fire the next workflow. `RELEASE_TOKEN` is therefore an account
-# token with `repo` and `workflow`; a dedicated fine-grained token with
-# contents/pull-requests/actions/workflows write is the intended replacement.
-# The workflow still verifies every step explicitly: it waits for the PR checks
-# before merging, and waits for the packaging run before claiming the release.
+# `RELEASE_TOKEN` is a user/fine-grained token rather than `GITHUB_TOKEN`: the
+# organization forbids GitHub Actions from creating pull requests, and pushes
+# made with `GITHUB_TOKEN` do not trigger downstream CI or packaging workflows.
 
 on:
   schedule:
-    # Hourly, off the hour: the nightly packaging run and everyone else's cron
-    # traffic do not need us at minute zero.
     - cron: '23 * * * *'
   workflow_dispatch:
 
@@ -40,32 +44,28 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # `opencode run --model` wants `provider/model`; OpenRouter's own ID follows.
   OPENCODE_MODEL: openrouter/deepseek/deepseek-v4.1-flash-1017
 
 jobs:
   advisories:
     name: check and patch
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
-      # A user token, not the workflow token: the organization forbids GitHub
-      # Actions from creating pull requests, and a GITHUB_TOKEN push or tag does
-      # not fire the next workflow. `RELEASE_TOKEN` is an account token with
-      # `repo` and `workflow`; replace it with a dedicated fine-grained token
-      # (contents, pull requests, actions, workflows: write) when one exists.
       GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
 
     steps:
       - uses: actions/checkout@v5
         with:
-          # The default branch is where a patch is released from, and the tag
-          # list is needed to compute the next patch version. The token makes
-          # the branch/tag pushes below real pushes, so CI and the packaging
-          # workflow react to them.
           ref: develop
           fetch-depth: 0
           token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Record starting commit
+        id: meta
+        run: |
+          set -euo pipefail
+          echo "start_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Patch only after the first stable release
         id: gate
@@ -81,14 +81,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: steps.gate.outputs.run == 'true'
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - uses: taiki-e/install-action@v2
         if: steps.gate.outputs.run == 'true'
         with:
           tool: cargo-deny
 
-      - name: Build a strict advisory config
+      - name: Look for pending security work
+        id: work
         if: steps.gate.outputs.run == 'true'
         run: |
           set -euo pipefail
@@ -101,14 +102,8 @@ jobs:
               if "TEMPORARY" not in line
           ]
           pathlib.Path("/tmp/deny-strict.toml").write_text("".join(lines))
-          print("removed every TEMPORARY line from deny.toml")
           PY
 
-      - name: Look for fixable vulnerabilities
-        id: deny
-        if: steps.gate.outputs.run == 'true'
-        run: |
-          set -euo pipefail
           status=0
           cargo deny --config /tmp/deny-strict.toml --format json check advisories \
             > /tmp/deny.out 2> /tmp/deny.json || status=$?
@@ -134,108 +129,126 @@ jobs:
           printf '%s\n' "$count" | sed '$d' | tee /tmp/vulnerabilities.txt
           echo "pending=$pending" >> "$GITHUB_OUTPUT"
 
-          # A failure that is not a vulnerability (an unmaintained crate, a
-          # licence, a source) is not this workflow's job: report it and stay
-          # red rather than handing it to the model.
+          # A non-vulnerability cargo-deny failure (unmaintained notice, license,
+          # source) is reported directly rather than handed to the security agent.
           if [ "$status" -ne 0 ] && [ "$pending" -eq 0 ]; then
             echo "cargo deny failed for a non-vulnerability reason" >&2
             cat /tmp/deny.out >&2
             exit "$status"
           fi
 
+          # Also check whether the highest release tag was left without a
+          # published GitHub release (e.g. a packaging failure or timeout on an
+          # earlier run), so a stranded release is recovered rather than ignored.
+          rm -f /tmp/unreleased-tag.txt
+          latest_tag=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -1)
+          unreleased_tag=""
+          if [ -n "$latest_tag" ]; then
+            released_assets=$(gh release view "$latest_tag" --json isDraft,assets \
+              --jq 'select(.isDraft == false) | .assets | length' 2>/dev/null || echo 0)
+            if [ "${released_assets:-0}" -eq 0 ]; then
+              unreleased_tag="$latest_tag"
+              tag_sha=$(git rev-parse "$latest_tag^{commit}")
+              {
+                echo "Tag $latest_tag (commit $tag_sha) has no published GitHub release."
+                echo
+                echo "Recent packaging-deb.yml runs:"
+                gh run list --workflow packaging-deb.yml --limit 10 \
+                  --json databaseId,status,conclusion,headSha,displayTitle,createdAt
+              } | tee /tmp/unreleased-tag.txt
+            fi
+          fi
+          echo "unreleased_tag=$unreleased_tag" >> "$GITHUB_OUTPUT"
+
+          if [ "$pending" -ne 0 ] || [ -n "$unreleased_tag" ]; then
+            echo "needs_agent=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_agent=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install OpenCode
-        if: steps.gate.outputs.run == 'true' && steps.deny.outputs.pending != '0'
+        if: steps.gate.outputs.run == 'true' && steps.work.outputs.needs_agent == 'true'
         run: |
           set -euo pipefail
-          # The v1 installer is the default on opencode.ai/install; the V2
-          # installer is what matches docs/v2 and the flags below.
           curl -fsSL https://opencode.ai/v2/install | bash
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+          git config user.name "tpmd security bot"
+          git config user.email "security-bot@offworld.nexus"
 
-      - name: Fix with headless OpenCode
-        if: steps.gate.outputs.run == 'true' && steps.deny.outputs.pending != '0'
+      - name: Run autonomous security agent
+        if: steps.gate.outputs.run == 'true' && steps.work.outputs.needs_agent == 'true'
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           set -euo pipefail
           export PATH="$HOME/.opencode/bin:$PATH"
-          cat > /tmp/prompt.md <<'PROMPT'
-          You are the dependency-security bot for the tpmd repository. `cargo deny`
-          found fixable RustSec vulnerabilities. Fix them in the working tree.
+          rm -f /tmp/security-blocked
 
-          Context:
-          - /tmp/deny.json: one JSON object per line; the diagnostics with
-            "code":"vulnerability" are the ones to fix.
-          - /tmp/deny-strict.toml: the config that was checked. It is deny.toml
-            with every line containing TEMPORARY removed, which is why the
-            advisories appear here even though the normal config accepts them.
+          cp .github/scripts/security-agent-prompt.md /tmp/prompt.md
+          {
+            echo
+            echo "---"
+            echo
+            echo "## Current Run Trigger"
+            echo
+            echo "- Pending vulnerability diagnostics: ${{ steps.work.outputs.pending }}"
+            if [ -s /tmp/vulnerabilities.txt ]; then
+              cat /tmp/vulnerabilities.txt
+            fi
+            if [ -f /tmp/unreleased-tag.txt ]; then
+              echo
+              echo "### Stranded Release Tag Requiring Recovery"
+              echo
+              cat /tmp/unreleased-tag.txt
+            fi
+          } >> /tmp/prompt.md
 
-          Rules:
-          1. Read /tmp/deny.json and identify every vulnerability diagnostic.
-          2. Fix the advisory at the highest version the project can take, not
-             the smallest version that silences it. Update the affected crates to
-             the newest published release, even when that is a
-             semver-incompatible bump: change the manifest constraints, then run
-             `cargo test --workspace --all-targets -q` and fix whatever the
-             upgrade breaks in Rust source, tests, configuration or feature
-             flags. You may use `cargo update`, `cargo upgrade` (install
-             cargo-edit if needed) or `--precise`. Do not stop at the advisory
-             minimum and do not choose a yanked version. Keep the change
-             focused: do not upgrade unrelated crates the advisory does not
-             require. For these two advisories the expected results are
-             crypto-bigint 0.7.10 and ctutils 0.4.8.
-          3. Remove only the ignore lines in deny.toml whose comment contains
-             TEMPORARY, together with the comment block that explains them.
-             Leave the zbus unmaintained ignores and every other line alone.
-          4. Run `cargo deny --config /tmp/deny-strict.toml check advisories`
-             until it passes, then `cargo test --workspace --all-targets -q`.
-             Duplicate-version and yanked-crate warnings are expected noise and
-             do not fail the check; leave them alone unless they are the crate
-             you are fixing and the chosen version is yanked.
-          5. Do not change the workspace version, do not write release notes, and
-             do not commit, push, tag or open a pull request. You may edit Rust
-             source, tests, manifests and configuration when that is what the
-             upgrade needs; the workflow owns the release.
-
-          If an advisory has no fixed version, or you cannot make the upgrade pass
-          the tests after a genuine attempt, stop and write /tmp/security-blocked
-          with the RUSTSEC id and what blocked it. Otherwise print a short list
-          of the crates you moved, with their old and new versions.
-          PROMPT
-          timeout 45m opencode --standalone run --auto \
+          timeout 95m opencode --standalone run --auto \
             --model "$OPENCODE_MODEL" --format json \
             "$(cat /tmp/prompt.md)" | tee /tmp/opencode.json
 
-      - name: Validate the fix
-        if: steps.gate.outputs.run == 'true' && steps.deny.outputs.pending != '0'
+      - name: Audit final repository and release state
+        if: steps.gate.outputs.run == 'true' && steps.work.outputs.needs_agent == 'true'
         run: |
           set -euo pipefail
           if [ -f /tmp/security-blocked ]; then
-            echo "OpenCode reported that it cannot fix this:" >&2
+            echo "Security agent reported a blocker requiring human intervention:" >&2
             cat /tmp/security-blocked >&2
             exit 1
           fi
-          if git diff --quiet; then
-            echo "OpenCode changed nothing" >&2
+
+          git fetch --prune --prune-tags --force origin
+
+          if ! git diff --quiet "${{ steps.meta.outputs.start_sha }}" origin/develop -- .github/workflows/; then
+            echo "audit failed: .github/workflows/ was modified on develop" >&2
+            git diff "${{ steps.meta.outputs.start_sha }}" origin/develop -- .github/workflows/ >&2
             exit 1
           fi
-          if git status --porcelain | awk '{print $2}' \
-            | grep -q '^\.github/workflows/'; then
-            echo "OpenCode edited the workflows; refusing to release that" >&2
+
+          vendored=$(git ls-tree -d --name-only origin/develop third-party vendor || true)
+          if [ -n "$vendored" ]; then
+            echo "audit failed: vendored crate directory present on develop: $vendored" >&2
             exit 1
           fi
-          if grep -E '^[[:space:]]*"RUSTSEC-' deny.toml \
-            | grep -v -E 'RUSTSEC-2026-037[012]' | grep -q .; then
-            echo "a new advisory ignore was added instead of fixing it" >&2
+
+          if git show origin/develop:Cargo.toml | grep -qE '^\[(patch|replace)(\.|\])'; then
+            echo "audit failed: [patch] or [replace] section added to Cargo.toml" >&2
             exit 1
           fi
-          if grep -q 'TEMPORARY' deny.toml; then
-            echo "a temporary advisory ignore survived the fix" >&2
+
+          if git show origin/develop:Cargo.toml | grep -qE '^[a-zA-Z0-9_-]+[[:space:]]*=.*git[[:space:]]*='; then
+            echo "audit failed: git dependency added to Cargo.toml" >&2
             exit 1
           fi
-          # Rebuild the strict config from what is about to be committed, so a
-          # missing permanent ignore (the zbus unmaintained notices) is caught
-          # here rather than by CI after the PR is open.
+
+          open_bot_prs=$(gh pr list --state open --json number,headRefName,title \
+            --jq '[.[] | select(.headRefName | startswith("security/"))]')
+          if [ "$open_bot_prs" != "[]" ]; then
+            echo "audit failed: open security/* PR(s) left unmerged: $open_bot_prs" >&2
+            exit 1
+          fi
+
+          git checkout --detach origin/develop
           python3 - <<'PY'
           import pathlib
           source = pathlib.Path("deny.toml")
@@ -244,155 +257,30 @@ jobs:
               for line in source.read_text().splitlines(keepends=True)
               if "TEMPORARY" not in line
           ]
-          pathlib.Path("/tmp/deny-strict.toml").write_text("".join(lines))
+          pathlib.Path("/tmp/deny-strict-final.toml").write_text("".join(lines))
           PY
-          cargo deny --config /tmp/deny-strict.toml check advisories
+          cargo deny --config /tmp/deny-strict-final.toml check
           cargo fmt --all --check
-          cargo test --workspace --all-targets -q
-          git diff --stat
 
-      - name: Bump the patch version
-        id: version
-        if: steps.gate.outputs.run == 'true' && steps.deny.outputs.pending != '0'
-        run: |
-          set -euo pipefail
-          latest=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -1)
-          [ -n "$latest" ] || { echo "no release tag to patch" >&2; exit 1; }
-          base=${latest#v}
-          major=${base%%.*}
-          rest=${base#*.}
-          minor=${rest%%.*}
-          patch=${rest#*.}
-          expected="${major}.${minor}.$((patch + 1))"
-          current=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-
-          python3 - "$current" "$expected" <<'PY'
-          import pathlib
-          import sys
-
-          current, expected = sys.argv[1], sys.argv[2]
-          manifest = pathlib.Path("Cargo.toml")
-          text = manifest.read_text()
-          updated = text.replace(f'version = "{current}"', f'version = "{expected}"')
-          if updated == text:
-              raise SystemExit(f"could not bump {current} in Cargo.toml")
-          manifest.write_text(updated)
-          PY
-
-          cargo update --workspace
-          cargo check --workspace --all-targets -q
-          echo "version=$expected" >> "$GITHUB_OUTPUT"
-          echo "patching $latest to v$expected"
-
-      - name: Write the release notes
-        if: steps.gate.outputs.run == 'true' && steps.deny.outputs.pending != '0'
-        run: |
-          set -euo pipefail
-          .github/scripts/security-release-notes.py \
-            --deny-json /tmp/deny.json \
-            --lock Cargo.lock \
-            --version "${{ steps.version.outputs.version }}" \
-            --output /tmp/release-notes.md
-          # A source change is part of the story: the upgrade was not a pure
-          # lockfile move, so say so rather than claiming it was.
-          if git diff --name-only HEAD \
-            | grep -v -E '^(Cargo\.toml|Cargo\.lock|deny\.toml)$' | grep -q .; then
-            {
-              echo
-              echo "## Fixes"
-              echo
-              echo "The dependency upgrade required source or test changes; the"
-              echo "release commit has the full diff."
-            } >> /tmp/release-notes.md
+          latest_tag=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -1)
+          [ -n "$latest_tag" ] || { echo "audit failed: no release tag found" >&2; exit 1; }
+          if [ "$(git cat-file -t "refs/tags/$latest_tag")" != "tag" ]; then
+            echo "audit failed: $latest_tag is not an annotated tag" >&2
+            exit 1
           fi
-          cat /tmp/release-notes.md
-
-      - name: Commit, push and open the PR
-        if: steps.gate.outputs.run == 'true' && steps.deny.outputs.pending != '0'
-        run: |
-          set -euo pipefail
-          branch="security/rustsec-$(date -u +%Y%m%d-%H%M%S)"
-          echo "branch=$branch" >> "$GITHUB_ENV"
-          git config user.name "tpmd security bot"
-          git config user.email "security-bot@offworld.nexus"
-          git switch -c "$branch"
-          git add -A
-          git commit \
-            -m "[security] Fix RustSec advisories for ${{ steps.version.outputs.version }}" \
-            -m "$(cat /tmp/release-notes.md)"
-          git push origin "$branch"
-          pr_url=$(gh pr create \
-            --base develop \
-            --head "$branch" \
-            --title "[security] Fix RustSec advisories for ${{ steps.version.outputs.version }}" \
-            --body "$(cat /tmp/release-notes.md)")
-          echo "pr=$pr_url" >> "$GITHUB_ENV"
-          echo "opened $pr_url"
-
-      - name: Wait for the PR checks
-        if: steps.gate.outputs.run == 'true' && steps.deny.outputs.pending != '0'
-        run: |
-          set -euo pipefail
-          # The PR was opened with a real user token, so `pull_request` fired
-          # CI. Wait until the check runs exist (the event takes a moment), then
-          # watch them; a required context that fails fails this step.
-          for _ in $(seq 1 60); do
-            count=$(gh pr checks "$pr" --json name --jq 'length' 2>/dev/null || echo 0)
-            [ "$count" -gt 0 ] && break
-            sleep 5
-          done
-          timeout 90m gh pr checks "$pr" --watch --interval 20
-
-      - name: Merge the PR
-        if: steps.gate.outputs.run == 'true' && steps.deny.outputs.pending != '0'
-        run: |
-          set -euo pipefail
-          # One retry: the base can move while the checks run, and branch
-          # protection requires the branch to be up to date.
-          if ! gh pr merge "$pr" --squash; then
-            echo "merge refused; rebasing on develop and waiting for CI once" >&2
-            git fetch origin develop
-            git rebase origin/develop
-            git push --force-with-lease origin "$branch"
-            for _ in $(seq 1 60); do
-              count=$(gh pr checks "$pr" --json name --jq 'length' 2>/dev/null || echo 0)
-              [ "$count" -gt 0 ] && break
-              sleep 5
-            done
-            timeout 90m gh pr checks "$pr" --watch --interval 20
-            gh pr merge "$pr" --squash
+          if ! git merge-base --is-ancestor "$latest_tag^{commit}" origin/develop; then
+            echo "audit failed: $latest_tag is not an ancestor of origin/develop" >&2
+            exit 1
           fi
-
-      - name: Tag and dispatch the release
-        if: steps.gate.outputs.run == 'true' && steps.deny.outputs.pending != '0'
-        run: |
-          set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
-          git fetch origin develop
-          git checkout -B develop origin/develop
-          git reset --hard origin/develop
-          git push origin --delete "$branch" || true
-
-          # The tag is annotated: the release workflow reads its first line as
-          # the release title and prepends the rest to the generated notes.
-          # `--cleanup=verbatim` is load-bearing: git's default cleanup treats
-          # lines starting with `#` as comments and would strip every Markdown
-          # heading from the release notes.
-          git tag -a --cleanup=verbatim "v$version" -F /tmp/release-notes.md
-          # A real user token makes this a real tag push, so `push` triggers the
-          # packaging workflow (a GITHUB_TOKEN push would not).
-          git push origin "v$version"
-
-          tag_sha=$(git rev-parse "v$version^{commit}")
-          run_id=""
-          for _ in $(seq 1 60); do
-            run_id=$(gh run list --workflow packaging-deb.yml \
-              --event push --limit 20 \
-              --json databaseId,headSha \
-              --jq ".[] | select(.headSha == \"$tag_sha\") | .databaseId" | head -1)
-            [ -n "$run_id" ] && break
-            sleep 5
-          done
-          [ -n "$run_id" ] || { echo "release run never appeared" >&2; exit 1; }
-          gh run watch "$run_id" --exit-status
-          echo "released v$version"
+          tag_cargo_ver=$(git show "$latest_tag:Cargo.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+          if [ "$tag_cargo_ver" != "${latest_tag#v}" ]; then
+            echo "audit failed: $latest_tag has Cargo.toml version $tag_cargo_ver" >&2
+            exit 1
+          fi
+          released_assets=$(gh release view "$latest_tag" --json isDraft,assets \
+            --jq 'select(.isDraft == false) | .assets | length' 2>/dev/null || echo 0)
+          if [ "${released_assets:-0}" -eq 0 ]; then
+            echo "audit failed: $latest_tag has no published GitHub release with assets" >&2
+            exit 1
+          fi
+          echo "audit passed: origin/develop is clean and $latest_tag is published ($released_assets assets)"
