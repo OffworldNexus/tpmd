@@ -22,8 +22,8 @@
 
 use std::path::{Path, PathBuf};
 
-use sea_orm::sqlx::sqlite::SqliteJournalMode;
-use sea_orm::{ConnectOptions, Database, DatabaseConnection};
+use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sea_orm::{DatabaseConnection, SqlxSqliteConnector};
 use sea_orm_migration::MigratorTrait as _;
 use tpmd_backend::BackendError;
 use tpmd_ipc::secure_fs;
@@ -50,19 +50,22 @@ pub async fn open(state_dir: &Path) -> Result<DatabaseConnection, BackendError> 
         .map_err(|e| BackendError::Unavailable(format!("creating state dir: {e}")))?;
 
     let db_path = database_path(state_dir);
-    // `?mode=rwc` makes sqlx create the file; `map_sqlx_sqlite_opts` is the
-    // only supported seam for WAL, which cannot be requested through the URL
-    // alone in a way we want to depend on.
-    let mut options = ConnectOptions::new(format!("sqlite://{}?mode=rwc", db_path.display()));
-    options.max_connections(5).map_sqlx_sqlite_opts(|sqlite| {
-        sqlite
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-    });
-
-    let db = Database::connect(options)
+    // The store knows its own path, so it hands SQLite the path itself rather
+    // than a `sqlite://` URL built from it: a URL round-trip cannot represent
+    // every filesystem path faithfully, and `url` 2.5.9 now rejects a Windows
+    // path's backslashes (`sqlite://C:\...`) as an invalid port. With
+    // `SqliteConnectOptions` there is no percent-encoding, no parser and no
+    // failed parse to route around, on any platform.
+    let sqlite = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect_with(sqlite)
         .await
         .map_err(|e| map_db_error("opening the store", e))?;
+    let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
 
     migration::Migrator::up(&db, None)
         .await
@@ -88,13 +91,17 @@ pub async fn open(state_dir: &Path) -> Result<DatabaseConnection, BackendError> 
     Ok(db)
 }
 
-/// Map a SeaORM failure onto the backend's error taxonomy.
+/// Map a store failure onto the backend's error taxonomy.
 ///
 /// A busy/locked database is a *transient* condition the caller can retry, not
 /// a corrupt store, so it must not be reported as an internal error: the
 /// protocol keeps `store_locked` distinct from `internal` on purpose.
+///
+/// Takes any error that can render itself because the store's failures arrive
+/// in two shapes: SeaORM's `DbErr` from queries and migrations, and sqlx's
+/// `Error` from opening the pool before a `DbErr` exists.
 #[must_use]
-pub fn map_db_error(context: &str, error: sea_orm::DbErr) -> BackendError {
+pub fn map_db_error(context: &str, error: impl std::fmt::Display) -> BackendError {
     let message = error.to_string();
     let lowered = message.to_ascii_lowercase();
     if lowered.contains("database is locked") || lowered.contains("table is locked") {
