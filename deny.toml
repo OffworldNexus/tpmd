@@ -51,11 +51,19 @@
 # None of them is a vulnerability: they are unmaintained notices about crates
 # that were merged into their parent. Remove these ignores as soon as
 # `secret-service` moves to zbus 6, or if that backend is dropped.
+# `chrono` was marked unmaintained on 2026-11-22 (RUSTSEC-2026-0543), with no
+# safe upgrade in the `chrono` crate itself (the advisory recommends migrating
+# to `jiff` or `time`). `tpmd` does not depend on `chrono` directly: it enters
+# the graph solely through `sea-orm` 2.0.4, `sea-query` 1.0.2 and `sqlx-core` /
+# `sqlx-sqlite` 0.9.0 (all the newest published releases on `crates.io`). Remove
+# this ignore as soon as `sea-orm` and `sqlx` drop their default/transitive
+# `chrono` dependency or migrate to `jiff`/`time`.
 ignore = [
     "RUSTSEC-2026-0459", # libsqlite3-sys: bundled SQLite < 3.54.0, not exposed
     "RUSTSEC-2026-0370", # zvariant, unmaintained
     "RUSTSEC-2026-0371", # zbus_names, unmaintained
     "RUSTSEC-2026-0372", # zvariant_derive, unmaintained
+    "RUSTSEC-2026-0543", # chrono, unmaintained (transitive via sea-orm/sqlx)
 ]
 
 [licenses]

@@ -158,17 +158,20 @@ nothing in it.
 
 ## Packaging
 
-- Debian/Ubuntu `.deb`, published nightly to two signed APT repositories —
-  Cloudsmith (primary) and the Forgejo mirror — and installable with a
-  `sources.list.d` entry; the user-facing page is `docs/install.md`. One
-  artifact per architecture serves every supported release. As of 0.1 APT is
-  the whole distribution: there is no RPM, Arch, Windows or macOS package yet.
+- Debian/Ubuntu `.deb`, published nightly and on release tags to the signed
+  Offworld Nexus APT repository (`https://apt.offworld-nexus.app`) and
+  installable with a `sources.list.d` entry; the user-facing page is
+  `docs/install.md`. One artifact per architecture serves every supported
+  release. As of 0.1 APT is the whole distribution: there is no RPM, Arch,
+  Windows or macOS package yet.
 - **Releasing** is tag-driven and automated; follow `docs/releasing.md` exactly.
   A `vX.Y.Z` annotated tag whose message becomes the release notes, on a commit
   whose workspace version is `X.Y.Z`, is the only input. The workflow builds,
-  publishes to both repositories, installs from each in a clean container per
-  supported release, then creates the GitHub release with the artifacts and a
-  `SHA256SUMS`. Never move or reuse a tag.
+  install-verifies in a clean container per supported release, stages the
+  `offworld-dist` bundle for the `offworld-nexus-packages` GitHub App on Chulak
+  (which signs, publishes, and posts the `offworld-pkg / publish` Check Run),
+  and creates the GitHub release with the artifacts and a `SHA256SUMS`. Never
+  move or reuse a tag.
 - **Security patches** are driven end-to-end by `.github/workflows/security.yml`
   (`.github/scripts/security-agent-prompt.md`), which runs hourly: it checks
   `cargo deny` with `TEMPORARY` ignores stripped (and checks that the latest
@@ -221,10 +224,9 @@ nothing in it.
   `dist/` is written there.
 
 - **Retention:** every stable release is kept; nightlies are pruned to the
-  newest seven versions by `packaging/deb/prune-nightlies.py` on Cloudsmith and
-  `packaging/deb/prune-forgejo-nightlies.py` on the mirror (the workflow's
-  `prune` and `prune-forgejo` jobs, after `verify`). Try them with `--dry-run`;
-  they delete whole versions and never one without `~nightly`.
+  newest seven release sets centrally by Chulak's `pkg-publisher` service after
+  the workflow's pre-publish `verify` matrix has proved every supported release.
+  Validate staging locally with `packaging/stage-dist.py --dry-run`.
 - Verify an install for real (needs docker and network; installs from the
   *published* repository in a clean container per release): `packaging/deb/verify-install.sh`.
 - **No distribution can build this package.** The workspace declares

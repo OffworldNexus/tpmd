@@ -1,10 +1,18 @@
 name: deb packages
 
 # Nightly .deb builds for every currently supported Debian-like release, and
-# tagged stable releases, pushed to the signed APT repositories on Cloudsmith
-# and the Forgejo mirror (see docs/install.md). Nothing here runs on the push or
-# pull-request path: the test suite and static analysis live in ci.yml, and this
-# workflow exists to publish, not to gate.
+# tagged stable releases, staged for the signed Offworld Nexus APT repository at
+# https://apt.offworld-nexus.app (see docs/install.md). Nothing here runs on the
+# push or pull-request path: the test suite and static analysis live in ci.yml,
+# and this workflow exists to build, verify and stage release artifacts.
+#
+# Zero publishing credentials live in GitHub secrets: once this workflow
+# completes with `success` and uploads `offworld-dist`, the organization's
+# `offworld-nexus-packages` GitHub App on Chulak receives the `workflow_run`
+# webhook, verifies ref/tag policy against the GitHub API, GPG-signs and indexes
+# the repository (`main` or `nightly`), prunes nightlies to the newest seven
+# release sets, syncs atomically to Incus S3 + Cloudflare R2, and posts the
+# `offworld-pkg / publish` Check Run on the commit.
 #
 # A `v*` tag is the release trigger. The tag's commit must carry the same
 # workspace version as the tag (the `version` job refuses otherwise), and the
@@ -12,8 +20,7 @@ name: deb packages
 # becomes the hand-written part of the release notes (docs/releasing.md).
 on:
   schedule:
-    # Nightly, off the hour so it does not collide with the release traffic of
-    # everyone else's nightly builds.
+    # Nightly, off the hour so it does not collide with everyone else's builds.
     - cron: '17 3 * * *'
   workflow_dispatch:
     inputs:
@@ -23,6 +30,12 @@ on:
           reuses this workflow unchanged with the tag's version.
         required: false
         type: string
+      rehearsal:
+        description: >-
+          Build and install-verify every package without uploading offworld-dist.
+        required: false
+        type: boolean
+        default: false
   push:
     tags:
       - 'v*'
@@ -30,34 +43,14 @@ on:
 permissions:
   contents: read
 
-env:
-  CLOUDSMITH_OWNER: offworld-nexus
-  # A repository variable, not a literal: the slug is also the URL users paste
-  # into sources.list.d, so changing it must be a settings change rather than a
-  # commit. The default is the intended slug; override it while a different one
-  # is in use.
-  CLOUDSMITH_REPO: ${{ vars.CLOUDSMITH_REPO || 'apt' }}
-  # The suite the .deb is published under. One artifact serves every release,
-  # which is the whole reason it can be published as any-distro/any-version.
-  CLOUDSMITH_DISTRO: any-distro
-  CLOUDSMITH_VERSION: any-version
-  # The second repository, on our own Forgejo instance. Host, owner and user are
-  # variables for the same reason as the Cloudsmith slug: users paste them into
-  # sources.list.d, so moving them is a settings change. The distribution is the
-  # same any-distro string and the components are the same channels, so the two
-  # repositories are interchangeable in an apt source line.
-  FORGEJO_URL: ${{ vars.FORGEJO_URL || 'https://forge.offworld.nexus' }}
-  FORGEJO_OWNER: ${{ vars.FORGEJO_OWNER || 'OffworldNexus' }}
-  FORGEJO_USER: ${{ vars.FORGEJO_USER || 'Xowap' }}
-  FORGEJO_DISTRIBUTION: any-distro
-
 jobs:
   version:
     name: decide the version
     runs-on: ubuntu-latest
     outputs:
       value: ${{ steps.pick.outputs.version }}
-      component: ${{ steps.pick.outputs.component }}
+      channel: ${{ steps.pick.outputs.channel }}
+      should_publish: ${{ steps.pick.outputs.should_publish }}
     steps:
       - uses: actions/checkout@v5
       - id: pick
@@ -65,11 +58,8 @@ jobs:
         run: |
           set -eu
           if [ "$GITHUB_REF_TYPE" = tag ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
-            # A tag is the release, and its name is the version. The commit must
-            # say the same thing: a package whose `tpmd --version` disagrees
-            # with its apt version is a lie that outlives the release.
             version="${GITHUB_REF_NAME#v}"
-            component=main
+            channel=stable
             cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
             if [ "$cargo_version" != "$version" ]; then
               echo "tag ${GITHUB_REF_NAME} is ${version}, but Cargo.toml says ${cargo_version}" >&2
@@ -77,18 +67,21 @@ jobs:
               exit 1
             fi
           elif [ -n "${{ inputs.version }}" ]; then
-            # A manual run off a branch is a nightly unless someone says
-            # otherwise, which is what the version input is for.
             version='${{ inputs.version }}'
-            component=nightly
+            channel=nightly
           else
             base=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
             version="${base}~nightly$(date -u +%Y%m%d).r${GITHUB_RUN_NUMBER}+g$(git rev-parse --short HEAD)"
-            component=nightly
+            channel=nightly
           fi
-          echo "packaging $version to the $component channel"
+          should_publish=true
+          if [ "${{ inputs.rehearsal }}" = "true" ]; then
+            should_publish=false
+          fi
+          echo "packaging $version for channel=$channel (should_publish=$should_publish)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "component=$component" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "should_publish=$should_publish" >> "$GITHUB_OUTPUT"
 
   # One source package per run, built once and shared: it is published beside the
   # binaries, and every architecture builds its binaries *from* it, so what
@@ -116,9 +109,6 @@ jobs:
             packaging/deb/build-source.sh dist
 
       - name: Lint the source package
-        # newer-standards-version only: the pinned container is the oldest
-        # supported release, and its lintian predates the policy version the
-        # package declares. Everything else fails the build.
         run: |
           docker run --rm \
             --user "$(id -u):$(id -g)" \
@@ -142,11 +132,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # arm64 builds natively rather than under emulation: GitHub's arm64
-          # runners are free for public repositories, and this workspace under
-          # QEMU is half an hour per nightly rather than a couple of minutes.
-          # Building on the target architecture also means the container base
-          # image, the toolchain and the glibc floor are all the real ones.
           - arch: amd64
             runner: ubuntu-latest
           - arch: arm64
@@ -164,9 +149,6 @@ jobs:
           path: source
 
       - name: Build the packages from the source package
-        # --network none is the proof that the published source is complete: a
-        # build that needed anything beyond the .dsc and its tarball fails here,
-        # rather than working in CI and nowhere else.
         run: |
           docker run --rm \
             --network none \
@@ -202,166 +184,13 @@ jobs:
           path: dist/*.deb
           if-no-files-found: error
 
-  publish:
-    name: publish
-    needs: [version, build]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v5
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Install the Cloudsmith CLI
-        run: pipx install cloudsmith-cli
-
-      - name: Push to the APT repository
-        env:
-          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
-        run: |
-          set -eu
-          # No --no-wait-for-sync: the verify job below installs from what this
-          # pushed, so it has to be there before this step returns.
-          # --republish because a nightly rebuilding the same version is a
-          # replacement rather than a conflict.
-          # The .dsc is pushed like a .deb: the CLI reads the files it lists
-          # and uploads the tarball with it, and the repository then serves it
-          # to `apt-get source`. The `deb-src` line the setup script writes
-          # expects it to be there.
-          for package in dist/*.deb dist/*.dsc; do
-            echo "pushing $package"
-            cloudsmith push deb \
-              "${CLOUDSMITH_OWNER}/${CLOUDSMITH_REPO}/${CLOUDSMITH_DISTRO}/${CLOUDSMITH_VERSION}" \
-              "$package" \
-              --component '${{ needs.version.outputs.component }}' \
-              --republish
-          done
-
-  # The same packages on our own Forgejo instance, as a second repository rather
-  # than a replacement: installable with one sources.list line, it is the copy
-  # that stays up when the hosted one does not. Its own job, running beside
-  # `publish`, because a mirror that is down must not stop the Cloudsmith push
-  # from having happened or `verify` from running — but it does fail the run,
-  # and deliberately so: a mirror that silently misses releases is worse than a
-  # red nightly. It is not in `release`'s needs, so a tag still releases.
-  publish-forgejo:
-    name: publish (forgejo)
-    needs: [version, build]
-    runs-on: ubuntu-latest
-    outputs:
-      mirrored: ${{ steps.mirror.outputs.mirrored }}
-    steps:
-      - uses: actions/download-artifact@v5
-        with:
-          path: dist
-          merge-multiple: true
-
-      - id: mirror
-        name: Push to the Forgejo APT repository
-        env:
-          FORGEJO_PACKAGES_TOKEN: ${{ secrets.FORGEJO_PACKAGES_TOKEN }}
-          COMPONENT: ${{ needs.version.outputs.component }}
-        run: |
-          set -eu
-          # A fork or a local run has no token and gets no mirror. That is the
-          # whole behaviour there: nothing above depends on this job.
-          if [ -z "${FORGEJO_PACKAGES_TOKEN:-}" ]; then
-            echo "FORGEJO_PACKAGES_TOKEN is not set, skipping the Forgejo mirror"
-            echo "mirrored=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          FORGEJO_URL=${FORGEJO_URL%/}
-          pool="${FORGEJO_URL}/api/packages/${FORGEJO_OWNER}/debian/pool/${FORGEJO_DISTRIBUTION}/${COMPONENT}"
-
-          # Echoes the HTTP status of one upload; the body is left in
-          # /tmp/upload.body for the failure path to print. `--fail-with-body`
-          # still exits non-zero for an HTTP error, hence `set +e` around the
-          # call: the status is what the branch below has to read. Its stderr is
-          # kept aside too, so an expected 409 does not read like a failure.
-          upload() {
-            local status
-            set +e
-            status=$(curl -sS --fail-with-body -o /tmp/upload.body -w '%{http_code}' \
-              --user "${FORGEJO_USER}:${FORGEJO_PACKAGES_TOKEN}" \
-              --upload-file "$1" "$pool/upload" 2>/tmp/upload.err)
-            set -e
-            echo "$status"
-          }
-
-          # Only the binaries. Forgejo's Debian registry generates no source
-          # index and rejects a .dsc upload, so `apt-get source` remains what
-          # Cloudsmith serves — a difference docs/install.md states.
-          for package in dist/*.deb; do
-            # <package>_<version>_<architecture>, extension off. A Debian
-            # version and package name cannot contain an underscore, so the
-            # split is exact.
-            file=$(basename "$package" .deb)
-            rest=${file#*_}
-            name=${file%%_*}
-            version=${rest%_*}
-            architecture=${rest##*_}
-
-            echo "pushing $package"
-            status=$(upload "$package")
-            if [ "$status" = 201 ]; then
-              continue
-            fi
-
-            # 409 is this same file already published, which a re-run of a
-            # failed run produces: the version is stamped from the run number
-            # and commit, so it does not change. Debian files cannot be replaced
-            # in place, so the counterpart of Cloudsmith's --republish is to
-            # delete this one file and upload it again.
-            if [ "$status" = 409 ]; then
-              curl -sS --fail-with-body -X DELETE \
-                --user "${FORGEJO_USER}:${FORGEJO_PACKAGES_TOKEN}" \
-                "$pool/${name}/${version}/${architecture}"
-              status=$(upload "$package")
-              if [ "$status" = 201 ]; then
-                continue
-              fi
-            fi
-
-            cat /tmp/upload.body /tmp/upload.err >&2
-            echo "pushing $file to the Forgejo mirror failed with HTTP $status" >&2
-            exit 1
-          done
-          echo "mirrored=true" >> "$GITHUB_OUTPUT"
-
+  # Pre-publish verification: every supported Debian/Ubuntu release installs the
+  # built package set natively on both amd64 and arm64 and unpacks the .dsc
+  # source *before* anything is staged into offworld-dist. A broken build never
+  # reaches the signed repository.
   verify:
     name: verify installs (${{ matrix.arch }})
-    needs: [version, publish]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Each runner installs the artefact built for its own architecture,
-          # from the published repository, on every supported release. This is
-          # the only place the arm64 build is ever installed and run, so a
-          # broken arm64 package cannot hide behind a green amd64 job.
-          - arch: amd64
-            runner: ubuntu-latest
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install from the published repository, release by release
-        env:
-          # The channel this run published to. The install check defaults to
-          # `main`, which is the stable channel, so a nightly that did not say
-          # so would verify the wrong one.
-          TPMD_VERIFY_COMPONENT: ${{ needs.version.outputs.component }}
-        run: packaging/deb/verify-install.sh
-
-  # The mirror is checked the same way, from the mirror, in a clean container
-  # per release. It is a separate job because a fork has no FORGEJO token and
-  # therefore no mirror to check; on a run that did mirror, it is just as much
-  # a release gate as Cloudsmith is, and `release` waits for it.
-  verify-forgejo:
-    name: verify installs from forgejo (${{ matrix.arch }})
-    needs: [version, publish-forgejo]
+    needs: [version, source, build]
     strategy:
       fail-fast: false
       matrix:
@@ -373,77 +202,70 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
-      - name: Install from the Forgejo mirror, release by release
-        # A run without the mirror token has nothing to check; the job still
-        # succeeds so `release` can depend on it unconditionally. On a run that
-        # mirrored, this is a release gate like the Cloudsmith one.
-        if: needs.publish-forgejo.outputs.mirrored == 'true'
-        env:
-          TPMD_VERIFY_REPO: forgejo
-          TPMD_VERIFY_COMPONENT: ${{ needs.version.outputs.component }}
-        run: packaging/deb/verify-install.sh
 
-  # The nightly channel keeps its last seven versions; stable keeps everything.
-  # After `verify`, never before: a nightly that did not install cleanly on every
-  # release does not get to push a good one out, and the version just published
-  # is always the newest, so it is always kept. See the script for why this is
-  # not Cloudsmith's own retention rule.
-  prune:
-    name: prune old nightlies
-    if: needs.version.outputs.component == 'nightly'
-    needs: [version, verify]
+      - uses: actions/download-artifact@v5
+        with:
+          name: deb-${{ matrix.arch }}
+          path: dist
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: deb-source
+          path: source
+
+      - name: Install and exercise the built packages across every supported release
+        run: |
+          TPMD_DEB="$(ls dist/tpmd_*_${{ matrix.arch }}.deb)" \
+          TPMD_DSC="$(ls source/*.dsc)" \
+          packaging/deb/verify-install.sh
+
+  stage:
+    name: stage for Offworld Nexus APT repository
+    if: needs.version.outputs.should_publish == 'true'
+    needs: [version, source, build, verify]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Keep the newest seven nightly versions
-        env:
-          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
-        run: python3 packaging/deb/prune-nightlies.py --keep 7
 
-  # The mirror keeps the same seven. After `verify` for the same reason, and
-  # only once the mirror publish happened: a run with no token, or one whose
-  # mirror push failed, leaves the mirror's retention alone. The whole version
-  # goes at once — the generic package API deletes it across both channels —
-  # and a stable release is never a candidate.
-  prune-forgejo:
-    name: prune old nightlies (forgejo)
-    if: needs.version.outputs.component == 'nightly' && needs.publish-forgejo.outputs.mirrored == 'true'
-    needs: [version, verify, verify-forgejo, publish-forgejo]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Keep the newest seven nightly versions
-        env:
-          FORGEJO_PACKAGES_TOKEN: ${{ secrets.FORGEJO_PACKAGES_TOKEN }}
-        run: python3 packaging/deb/prune-forgejo-nightlies.py --keep 7
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: deb-*
+          path: dist
+          merge-multiple: true
 
-  # A tag is a release, and from 0.1 the Debian packages are the complete set:
-  # tpmd is distributed by apt only for now, and RPM/Arch/Windows/macOS
-  # packaging will add their own workflows and artifacts in later versions. The
-  # job therefore waits for both repositories to have been published and
-  # installed cleanly, then creates the GitHub release and attaches exactly
-  # what was published.
-  #
-  # The tag must be annotated (docs/releasing.md). Its first line is the release
-  # title; the remaining lines are prepended to GitHub's generated notes, so the
-  # hand-written summary is the first thing a reader sees and the commit/PR list
-  # is still there underneath.
+      - name: Validate and build offworld-dist bundle
+        run: |
+          python3 packaging/stage-dist.py \
+            --source tpmd \
+            --channel '${{ needs.version.outputs.channel }}' \
+            --version '${{ needs.version.outputs.value }}' \
+            --out "$RUNNER_TEMP/offworld-dist" \
+            --file 'deb:amd64:dist/*_amd64.deb' \
+            --file 'deb:arm64:dist/*_arm64.deb' \
+            --file 'deb-src:source:dist/*.dsc'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: offworld-dist
+          path: ${{ runner.temp }}/offworld-dist
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     name: git release
-    if: github.ref_type == 'tag'
-    needs: [version, source, build, publish, verify, verify-forgejo]
+    if: github.ref_type == 'tag' && needs.version.outputs.should_publish == 'true'
+    needs: [version, source, build, verify, stage]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v5
         with:
-          # The annotated tag message lives in the tag object, not in the commit,
-          # so the whole history (and the tag) has to be fetched.
           fetch-depth: 0
 
       - uses: actions/download-artifact@v5
         with:
+          pattern: deb-*
           path: dist
           merge-multiple: true
 
@@ -455,9 +277,6 @@ jobs:
         id: tag
         run: |
           set -eu
-          # actions/checkout resolves a tag ref to its commit and force-updates
-          # the local tag to that commit, which discards the annotation. Fetch
-          # the tag object back before reading its message.
           git fetch --force --no-tags origin \
             "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
           if [ "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" != tag ]; then
