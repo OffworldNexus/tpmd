@@ -22,25 +22,27 @@ Pushing a `v*` tag starts `deb packages` (`.github/workflows/packaging-deb.yml`)
    container, lints it, and publishes it as a workflow artifact.
 3. `build` builds the `.deb`s **from that source package**, offline, for
    `amd64` and `arm64`, and lints them.
-4. `publish` pushes the `.deb`s and `.dsc` to Cloudsmith's `main` component.
-5. `publish-forgejo` pushes the same `.deb`s to the Forgejo mirror's `main`
-   component. A run without `FORGEJO_PACKAGES_TOKEN` skips this, as a fork does.
-6. `verify` installs from Cloudsmith in a clean container for every supported
-   release, and `verify-forgejo` does the same from the mirror: repository
-   signature, the split backend packages, the plugin loader, the daemon, and
-   the package lifecycle.
-7. `release` creates the GitHub release, attaches every artifact and a
+4. `verify` installs the built `.deb` set and unpacks the `.dsc` source in a
+   clean container for every supported release on both `amd64` and `arm64`:
+   the split backend packages, the plugin loader, the daemon, and the package
+   lifecycle.
+5. `stage` validates the artifacts with `packaging/stage-dist.py` and uploads
+   the `offworld-dist` bundle. When the workflow completes with `success`, the
+   organization's `offworld-nexus-packages` GitHub App on Chulak receives the
+   `workflow_run` webhook, verifies tag/branch policy against the GitHub API,
+   signs and publishes the packages to `https://apt.offworld-nexus.app` (`main`
+   or `nightly`), prunes nightlies to the newest seven release sets, and posts
+   the `offworld-pkg / publish` Check Run on the commit.
+6. `release` creates the GitHub release, attaches every artifact and a
    `SHA256SUMS`, and prepends the tag message to GitHub's generated notes.
 
-A tag is only a release if every one of those succeeds. There is no manual
-"publish" switch and no repository variable to flip.
+A tag is only a release if every one of those succeeds. Zero repository
+publishing credentials live in GitHub secrets.
 
 ### Repository secrets
 
 | Secret | Used by | Purpose |
 | --- | --- | --- |
-| `CLOUDSMITH_API_KEY` | `packaging-deb.yml` | push to the primary APT repository |
-| `FORGEJO_PACKAGES_TOKEN` | `packaging-deb.yml` | push to the mirror; absent means no mirror |
 | `OPENROUTER_API_KEY` | `security.yml` | the headless OpenCode model |
 | `RELEASE_TOKEN` | `security.yml` | push branches/tags and open/merge the bot PR |
 
@@ -112,8 +114,7 @@ The first stable release of the tpmd local key agent.
 - One `tpmd` binary and one package per backend above the built-in `file`
   floor, chosen at run time and committed on first use.
 - A closed credential store is a waitable state, not an error.
-- Debian and Ubuntu installs are available from Cloudsmith and the Forgejo
-  mirror.
+- Debian and Ubuntu installs are available from `https://apt.offworld-nexus.app`.
 
 ## Security
 
@@ -144,7 +145,7 @@ Rules for the text:
 * **Do not** paste a commit list or a `git log`; GitHub appends its generated
   "What's Changed" notes underneath the hand-written body.
 * **Do not** claim a platform the release does not ship. As of 0.1 that means
-  Debian and Ubuntu on `amd64`/`arm64`, from both repositories.
+  Debian and Ubuntu on `amd64`/`arm64`, from `https://apt.offworld-nexus.app`.
 
 ## Publishing
 
@@ -175,14 +176,10 @@ picks the tag's version and the `main` component, exactly like a pushed tag.
 
 ## After the release
 
-Check that both repositories really carry it, from a clean container:
+Check that the published APT repository carries it, from a clean container:
 
 ```sh
-# Cloudsmith
-TPMD_VERIFY_REPO=cloudsmith packaging/deb/verify-install.sh debian:13
-
-# Forgejo
-TPMD_VERIFY_REPO=forgejo packaging/deb/verify-install.sh debian:13
+packaging/deb/verify-install.sh debian:13
 ```
 
 Then confirm the GitHub release has the title, the body and the assets:
@@ -269,8 +266,8 @@ temporary acceptance cannot hide a fixable advisory from the bot.
 
 * Do not release from a dirty tree, a feature branch, or a commit that is not on
   `develop`.
-* Do not tag to "see what happens". The pipeline publishes to both `main`
-  components; a tag is a release users can install.
+* Do not tag to "see what happens". The pipeline publishes to the signed `main`
+  channel; a tag is a release users can install.
 * Do not publish a stable version by dispatching a *branch* run with a stable
   version. That would put packages on the stable channel without a GitHub
   release or a tag to point at.

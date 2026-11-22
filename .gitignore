@@ -22,10 +22,9 @@ packaging/build/
 *.p8
 *.mobileprovision
 
-# Local secrets. The root .env holds publishing credentials (the Cloudsmith API
-# key among them) and must never be committed — the file name is ignored at the
-# root only, so the committed `packaging/fastlane/.env.default` template stays
-# tracked.
+# Local secrets. The root .env must never be committed — the file name is
+# ignored at the root only, so the committed `packaging/fastlane/.env.default`
+# template stays tracked.
 /.env
 /.env.*
 
@@ -50,7 +49,3 @@ packaging/build/
 # The split stages one directory per package beside the control files, so the
 # pattern has to be here before the first split build rather than after it.
 /debian/tpmd-*/
-
-# The Cloudsmith CLI leaves its own logs in the working directory on a push, and
-# they are root-owned when a containerised build pushed; never ours to commit.
-.csm_*

@@ -1,11 +1,11 @@
 # Installing tpmd
 
-`tpmd` is published as Debian packages from two signed APT repositories — the
-primary one on Cloudsmith and a mirror on our Forgejo instance — each two
-channels deep and built nightly for every currently supported Debian-like
-release. One artifact per architecture serves them all: the daemon's only
-runtime dependency is glibc, so a single build installs and runs from Debian 12
-through sid and from Ubuntu 22.04 through 26.04.
+`tpmd` is published as Debian packages from the signed Offworld Nexus APT
+repository (`https://apt.offworld-nexus.app`), two channels deep (`main` for
+releases, `nightly` for nightlies) and built nightly for every currently
+supported Debian-like release. One artifact per architecture serves them all:
+the daemon's only runtime dependency is glibc, so a single build installs and
+runs from Debian 12 through sid and from Ubuntu 22.04 through 26.04.
 
 The published set is the agent plus one package per backend above the built-in
 floor. Installing `tpmd` brings the whole ladder with it — the backend
@@ -16,18 +16,23 @@ serves at `file` and refuses what it cannot protect.
 ## Install
 
 ```sh
-curl -1sLf 'https://dl.cloudsmith.io/public/offworld-nexus/apt/cfg/setup/bash.deb.sh' | sudo -E bash
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo curl -fsSL https://apt.offworld-nexus.app/keyring.gpg \
+  -o /etc/apt/keyrings/offworld-nexus.gpg
+sudo tee /etc/apt/sources.list.d/offworld-nexus.sources >/dev/null <<'EOF'
+Types: deb deb-src
+URIs: https://apt.offworld-nexus.app
+Suites: any-distro
+Components: main
+Signed-By: /etc/apt/keyrings/offworld-nexus.gpg
+EOF
 sudo apt-get update
 sudo apt-get install tpmd
 ```
 
-The first line adds the repository and its signing key. The second installs the
-system agent, enables it and starts it.
-
-<a href="https://cloudsmith.com"><img alt="OSS hosting by cloudsmith" src="https://img.shields.io/badge/OSS%20hosting%20by-cloudsmith-blue?logo=cloudsmith&style=flat-square"></a>
-
-Package repository hosting is graciously provided by [Cloudsmith](https://cloudsmith.com),
-the only fully hosted, cloud-native, universal package management solution.
+Swap `Components: main` for `Components: nightly` (or `Components: main nightly`)
+to follow nightly builds. The setup adds the repository and its signing key, and
+`apt-get install tpmd` installs the system agent, enables it and starts it.
 
 Then ask it what it can do:
 
@@ -188,54 +193,24 @@ installed cleanly on every supported release. A nightly is therefore something
 to upgrade from, not something to pin: `apt-get install tpmd=<version>` of a
 nightly works for about a week. Pin a stable release instead.
 
-A `v*` tag is a release, and the same pipeline builds it: the bare version goes
-to the `main` component of both repositories, is installed from each of them in
-a clean container per supported release, and is then attached to the GitHub
-release for that tag together with its source package and a `SHA256SUMS` file.
-As of 0.1 the Debian packages are the complete set — tpmd is distributed by APT
-only — so a tag is a complete release. RPM, Arch, Windows and macOS packaging
-will add their own workflows and artifacts in later versions, and the release
-step will wait for those too when they exist.
+A `v*` tag is a release, and the same pipeline builds it: the bare version is
+verified in a clean container per supported release, staged into `offworld-dist`
+for publication to `https://apt.offworld-nexus.app` (`main`), and attached to
+the GitHub release for that tag together with its source package and a
+`SHA256SUMS` file. As of 0.1 the Debian packages are the complete set — tpmd is
+distributed by APT only — so a tag is a complete release. RPM, Arch, Windows
+and macOS packaging will add their own workflows and artifacts in later
+versions, and the release step will wait for those too when they exist.
 
 Releasing is tag-driven and documented in [`releasing.md`](releasing.md): the
 tag is annotated, its first line is the release title, and the rest of the
 message is prepended to GitHub's generated notes.
 
-To follow releases instead of nightlies, install and then hold:
+To pin a machine against upgrades once installed:
 
 ```sh
 sudo apt-mark hold tpmd
 ```
-
-## Alternative APT repository (Forgejo)
-
-The same packages are mirrored to the Debian registry of our Forgejo instance,
-with the same two channels — `main` for releases, `nightly` for nightlies — and
-the same distribution that serves every release, so a machine installs from it
-exactly the way it does from Cloudsmith:
-
-```sh
-sudo install -d -m 0755 /etc/apt/keyrings
-sudo curl -1sLf https://forge.offworld.nexus/api/packages/OffworldNexus/debian/repository.key \
-  -o /etc/apt/keyrings/forgejo-offworldnexus.asc
-echo "deb [signed-by=/etc/apt/keyrings/forgejo-offworldnexus.asc] https://forge.offworld.nexus/api/packages/OffworldNexus/debian any-distro nightly" \
-  | sudo tee /etc/apt/sources.list.d/tpmd-forgejo.list
-sudo apt-get update
-sudo apt-get install tpmd
-```
-
-Swap `nightly` for `main` to follow releases instead. Both repositories can be
-configured at the same time: the versions are identical, so which one apt
-resolves to does not change what is installed.
-
-The packages themselves are listed on the organization's package page,
-<https://forge.offworld.nexus/OffworldNexus/-/packages>. Forgejo's Debian
-registry is owner-scoped, so the repository's own *Packages* tab stays empty
-even though apt sees the packages; use the organization page to look at them.
-
-One difference is worth knowing: the mirror serves binaries only. Forgejo's
-Debian registry has no source index, so `apt-get source tpmd` and the `deb-src`
-line above stay a Cloudsmith capability.
 
 ## Source packages
 
@@ -246,7 +221,7 @@ apt-get source tpmd                # the newest one apt knows about
 apt-get source tpmd=<version>      # the source of exactly what you installed
 ```
 
-The setup script above already adds the `deb-src` line this needs. The source
+The `deb822` source entry above already includes `Types: deb deb-src`. The source
 is the commit the version was stamped from, plus every Rust dependency vendored
 into `vendor/`, so it builds without the network. It is not a courtesy copy:
 the published binaries are built *from* it, offline, so a source that could not

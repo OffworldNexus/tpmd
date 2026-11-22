@@ -135,9 +135,9 @@ def main() -> int:
         "sudo apt-get install --only-upgrade tpmd",
         "```",
         "",
-        "The Cloudsmith repository and the Forgejo mirror carry the same version,",
-        "so a machine configured for either upgrades the same way. Keys live in",
-        "`/var/lib/tpmd` and are untouched by an upgrade.",
+        "The signed APT repository (`https://apt.offworld-nexus.app`) carries the",
+        "updated version. Keys live in `/var/lib/tpmd` and are untouched by an",
+        "upgrade.",
         "",
     ]
     args.output.write_text("\n".join(lines))
